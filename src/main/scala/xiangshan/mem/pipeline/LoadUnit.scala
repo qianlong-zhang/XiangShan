@@ -229,6 +229,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   // query DTLB
   io.dtlbReq.valid := s0_valid
   // hw prefetch addr does not need to be translated, give tlb paddr
+  // TODO: 走LSU的预取请求发出来的是PA
   io.dtlbReq.bits.vaddr := Mux(lfsrc_hwprefetch_select, io.prefetch_in.bits.paddr, s0_vaddr) 
   io.dtlbReq.bits.cmd := Mux(isPrefetch,
     Mux(isPrefetchWrite, TlbCmd.write, TlbCmd.read),
@@ -375,6 +376,11 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   io.out.bits.isHWPrefetch := isHWPrefetch
   io.out.bits.isLoadReplay := s0_isLoadReplay
   io.out.bits.mshrid := s0_mshrid
+
+  // TODO: forward_tlDchannel具体作用
+  // 从load queue送来的信号中, 如果表示发生了replay, 而且replay的原因是dcache miss(io.replay.bits.forward_tlDchannel)
+  // 则拉高该信号, 用于从返回的Dcache cacheline中选择数据给load_s2
+
   io.out.bits.forward_tlDchannel := io.replay.valid && io.replay.bits.forward_tlDchannel
   when(io.dtlbReq.valid && s0_isFirstIssue) {
     io.out.bits.uop.debugInfo.tlbFirstReqTime := GTimer()
@@ -384,6 +390,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   io.out.bits.sleepIndex := s0_sleepIndex
 
   // load fast replay
+
+  // io.out.ready连接load_s1.io.in
   io.fastReplay.ready := (io.out.ready && io.dcacheReq.ready && lfsrc_loadFastReplay_select)
 
   // load flow source ready
@@ -391,6 +399,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   // io.replay has highest priority
   io.replay.ready := (io.out.ready && io.dcacheReq.ready && lfsrc_loadReplay_select && !s0_replayShouldWait)
 
+  // TODO: 预取比普通load还要早, 是否会有问题? confidence高,不代表立马就会用, 只是后面一定会用
+  // 目前走load pipe的预取器暂时未使能
   // accept load flow from rs when:
   // 1) there is no lsq-replayed load
   // 2) there is no high confidence prefetch request
@@ -444,6 +454,7 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
   })
 
   val s1_uop = io.in.bits.uop
+  // TODO: 这里paddr(0) paddr(1)什么区别?, paddr(0)是完整地址, paddr(1)是cacheline地址?
   val s1_paddr_dup_lsu = io.dtlbResp.bits.paddr(0)
   val s1_paddr_dup_dcache = io.dtlbResp.bits.paddr(1)
   // af & pf exception were modified below.
@@ -454,16 +465,22 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
   val s1_is_hw_prefetch = io.in.bits.isHWPrefetch
   val s1_is_sw_prefetch = s1_is_prefetch && !s1_is_hw_prefetch
 
+  // 暂时把in信号给到out，后面会覆盖更新
   io.out.bits := io.in.bits // forwardXX field will be updated in s1
 
+  //dtlbResp中为什么有memidx? 是dtlbReq中送进去的, 用来记录lqIdx和sqIdx, 只为了返回resp时的idx比较, 例如下面
   val s1_tlb_memidx = io.dtlbResp.bits.memidx
   when(s1_tlb_memidx.is_ld && io.dtlbResp.valid && !s1_tlb_miss && s1_tlb_memidx.idx === io.out.bits.uop.lqIdx.value) {
     // printf("load idx = %d\n", s1_tlb_memidx.idx)
     io.out.bits.uop.debugInfo.tlbRespTime := GTimer()
   }
 
+  // TODO: 这里为什么直接把ready拉高? 告诉TLB我可以接收请求？
+  // 因为loadS1 一直可以接收dtlbResp
   io.dtlbResp.ready := true.B
 
+  // 把从tlb中获取的pa记录下来, 通过loadUnits送到Dcache,
+  // 不过dcache只用了dcachePAddr,没有用lsuPAddr
   io.lsuPAddr := s1_paddr_dup_lsu
   io.dcachePAddr := s1_paddr_dup_dcache
   //io.dcacheKill := s1_tlb_miss || s1_exception || s1_mmio
@@ -486,6 +503,9 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
   io.lsq.mask := s1_mask
   io.lsq.pc := s1_uop.cf.pc // FIXME: remove it
 
+  // 对于s1和s2, 都要去检查是否因为发生了violation导致需要replay这些load指令
+  // 对于S0和S3为什么没有? S1才能拿到paddr进行检查，s0拿不到, 因此无法检查. S3已经写回, 无法通过s1_schedError进行replay
+  // 只能通过flush进行回滚
   // st-ld violation query
   val s1_schedError =  VecInit((0 until StorePipelineWidth).map(w => io.reExecuteQuery(w).valid &&
                           isAfter(io.in.bits.uop.robIdx, io.reExecuteQuery(w).bits.robIdx) && 
@@ -493,7 +513,9 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
                           (s1_mask & io.reExecuteQuery(w).bits.mask).orR)).asUInt.orR && !s1_tlb_miss
 
   // Generate forwardMaskFast to wake up insts earlier
+  // 该信号没有使用， 在SimTop.v中没有检索到
   val forwardMaskFast = io.lsq.forwardMaskFast.asUInt | io.sbuffer.forwardMaskFast.asUInt
+  // 该信号没有使用， 在SimTop.v中没有检索到
   io.fullForwardFast := ((~forwardMaskFast).asUInt & s1_mask) === 0.U
 
   io.out.valid := io.in.valid && !io.s1_kill
@@ -503,16 +525,20 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
   // Generate replay signal caused by:
   // * st-ld violation check
   // * dcache bank conflict
+  // bank conflict在dcache返回的replay信号中, 在s2处理
   io.out.bits.replayInfo.cause(LoadReplayCauses.schedError) := s1_schedError && !s1_is_sw_prefetch
   io.out.bits.replayInfo.debug := io.in.bits.uop.debugInfo
 
   // current ori test will cause the case of ldest == 0, below will be modifeid in the future.
   // af & pf exception were modified
+  // 如果tlbResp表示当前的访问发生了pageFault或者access fault, 则会通过dcacheKill信号送到dcache,
+  // 取消后续dcache访问流程
   io.out.bits.uop.cf.exceptionVec(loadPageFault) := io.dtlbResp.bits.excp(0).pf.ld
   io.out.bits.uop.cf.exceptionVec(loadAccessFault) := io.dtlbResp.bits.excp(0).af.ld
   io.out.bits.ptwBack := io.dtlbResp.bits.ptwBack
   io.out.bits.rsIdx := io.in.bits.rsIdx
 
+  // 只有当进入的uop无效或者uop有效但是能送出到s2才可以接收新的uop
   io.in.ready := !io.in.valid || io.out.ready
 
   XSPerfAccumulate("in_valid", io.in.valid)
@@ -571,6 +597,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
     val l2Hint = Input(Valid(new L2ToL1Hint))
   })
 
+  // TODO: 如果是静态pm则覆盖从pmp的查询结果
   val pmp = WireInit(io.pmpResp)
   when (io.static_pm.valid) {
     pmp.ld := false.B
@@ -596,7 +623,9 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   when (s2_is_prefetch || io.in.bits.tlbMiss) {
     s2_exception_vec := 0.U.asTypeOf(s2_exception_vec.cloneType)
   }
-  val s2_exception = ExceptionNO.selectByFu(s2_exception_vec, lduCfg).asUInt.orR 
+  // 从发生的异常向量中选择，看是否有inloadAddrMisaligned, loadAccessFault, loadPageFault发生
+  // 重新给sc_exception
+  val s2_exception = ExceptionNO.selectByFu(s2_exception_vec, lduCfg).asUInt.orR
 
   // writeback access fault caused by ecc error / bus error
   //
@@ -622,20 +651,28 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   val s2_mmio = !s2_is_prefetch && actually_mmio && !s2_exception && !s2_tlb_miss
   val s2_cache_miss = io.dcacheResp.bits.miss && !forward_D_or_mshr_valid
   val s2_cache_replay = io.dcacheResp.bits.replay && !forward_D_or_mshr_valid
+  // 如果在dcache中分配了mshr,或者命中了已经分配的mshr, 则回复handled给LoadUnit
   val s2_cache_handled = io.dcacheResp.bits.handled
   val s2_cache_tag_error = RegNext(io.csrCtrl.cache_error_enable) && io.dcacheResp.bits.tag_error
+  // 如果从store queue和store buffer都没有forward数据,则forward fail
   val s2_forward_fail = io.lsq.matchInvalid || io.sbuffer.matchInvalid
+  // 如果命中了store set, address not ready, 则标记为addrInvalid
   val s2_wait_store = io.in.bits.uop.cf.storeSetHit && 
                       io.lsq.addrInvalid &&
                       !s2_mmio &&
-                      !s2_is_prefetch 
+                      !s2_is_prefetch
+  // 有可能store的数据还没有准备好
   val s2_data_invalid = io.lsq.dataInvalid && !s2_exception
   val s2_fullForward = WireInit(false.B)
+  // 发生bankConflic且没有从dcache拿到forward数据
   val s2_bank_conflict = io.dcacheBankConflict && !forward_D_or_mshr_valid
 
   io.s2_forward_fail := s2_forward_fail
+  // 如果pmp返回不能继续处理该load uop(如果是mmio操作,不需要访问cache), 则发送kill给dcache
   io.dcache_kill := pmp.ld || pmp.mmio // move pmp resp kill to outside
+  // dcacheResp始终可以随时从dcache发到LDU
   io.dcacheResp.ready := true.B
+  // 对于这四种情况,dcache应该返回有效的response,如果没返回就是出错了
   val dcacheShouldResp = !(s2_tlb_miss || s2_exception || s2_mmio || s2_is_prefetch)
   assert(!(io.in.valid && (dcacheShouldResp && !io.dcacheResp.valid)), "DCache response got lost")
 
@@ -645,12 +682,17 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   //  2. Load instruction is younger than requestors(store instructions).
   //  3. Physical address match.
   //  4. Data contains.
+  // 在S2继续判断, store pipe中的指令是否与当前load pipe中的uop发生了violation, 如果这时候判断清楚, 可以通过replay处理
+  // 如果等写回了再判断就晚了,只能flush流水线.
   val s2_schedError = VecInit((0 until StorePipelineWidth).map(w => io.reExecuteQuery(w).valid &&
                               isAfter(io.in.bits.uop.robIdx, io.reExecuteQuery(w).bits.robIdx) &&
                               (s2_paddr(PAddrBits-1,3) === io.reExecuteQuery(w).bits.paddr(PAddrBits-1, 3)) &&
                               (s2_mask & io.reExecuteQuery(w).bits.mask).orR)).asUInt.orR &&
                               !s2_tlb_miss 
 
+  //1. s1或者s2已经判断出st-ld的violation
+  //2. cache_replay: way predictor的fail或者bank conflict或者MSHR满
+  //3. l2返回Hint
   val s2_fast_replay = ((s2_schedError || io.in.bits.replayInfo.cause(LoadReplayCauses.schedError)) ||
                        (!s2_wait_store &&
                        !s2_tlb_miss &&
@@ -661,6 +703,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
                        !s2_mmio &&
                        !s2_is_prefetch
   // need allocate new entry
+  // 如果没有发生以下这些问题, 则进行violation query
   val s2_allocValid = !s2_tlb_miss &&
                       !s2_is_prefetch && 
                       !s2_exception && 
@@ -670,6 +713,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
                       !io.in.bits.replayInfo.cause(LoadReplayCauses.schedError) 
 
   // ld-ld violation require
+  // 在S2送到LoadQueue进行violation查询, S3拿到结果
   io.loadLoadViolationQueryReq.valid := io.in.valid && s2_allocValid
   io.loadLoadViolationQueryReq.bits.uop := io.in.bits.uop
   io.loadLoadViolationQueryReq.bits.mask := s2_mask
@@ -687,6 +731,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   io.storeLoadViolationQueryReq.bits.paddr := s2_paddr
   io.storeLoadViolationQueryReq.bits.datavalid := io.loadLoadViolationQueryReq.bits.datavalid
 
+  // 这里用来确定是否因为LoadQueueRAR, LoadQueueRAW无法接收新请求导致的replay
   val s2_rarCanAccept = !io.loadLoadViolationQueryReq.valid || io.loadLoadViolationQueryReq.ready
   val s2_rawCanAccept = !io.storeLoadViolationQueryReq.valid || io.storeLoadViolationQueryReq.ready
   val s2_rarReject = !s2_rarCanAccept
@@ -697,6 +742,8 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   val forwardMask = Wire(Vec(8, Bool()))
   val forwardData = Wire(Vec(8, UInt(8.W)))
 
+  // 判断是否能通过storequeue或者store buffer两个forward通路拿到了完整的forward数据
+  //TODO: 如果load访问粒度是byte与load word, 这里的处理是否正确?
   val fullForward = ((~forwardMask.asUInt).asUInt & s2_mask) === 0.U && !io.lsq.dataInvalid
   io.lsq := DontCare
   io.sbuffer := DontCare
@@ -706,6 +753,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   // generate XLEN/8 Muxs
   for (i <- 0 until XLEN / 8) {
     forwardMask(i) := io.lsq.forwardMask(i) || io.sbuffer.forwardMask(i)
+    // sq中的数据相比storeBuffer中更新, 因此其优先级比sbuffer更高是理所应当.
     forwardData(i) := Mux(io.lsq.forwardMask(i), io.lsq.forwardData(i), io.sbuffer.forwardData(i))
   }
 
@@ -734,20 +782,32 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   //   "b111".U -> rdata(63, 56)
   // ))
   // val rdataPartialLoad = rdataHelper(s2_uop, rdataSel) // s2_rdataPartialLoad is not used
+  //如果needReplay()为true,即发生replay了, 会在S2就开始判断lqReplayFull是否为true,
+  // 如果LoadQueueReplay满了则直接通过feedbackFast送到RS进行处理, 不会发送到S3, 也就无法触发in-pipe的replay. 如果没满送到S3进行继续处理.
+  // 如果是isLoadReplay，则说明是从LoadQueueReplay中送出的请求，不需要再次送到RS
   io.feedbackFast.valid := io.in.valid && !io.in.bits.isLoadReplay && !s2_exception && io.lqReplayFull && io.out.bits.replayInfo.needReplay() && !io.out.bits.uop.robIdx.needFlush(io.redirect)
-  io.feedbackFast.bits.hit := false.B 
+  // hit为false, 代表告诉RS, 我这条指令没有正常执行, 你不能从RS中把这条指令删除
+  io.feedbackFast.bits.hit := false.B
+  // 该信号没有被使用. 当ptw结束返回resp后, 唤醒在RS中的指令重新发射执行.
   io.feedbackFast.bits.flushState := io.in.bits.ptwBack
-  io.feedbackFast.bits.rsIdx := io.in.bits.rsIdx 
+  io.feedbackFast.bits.rsIdx := io.in.bits.rsIdx
+  // 告诉RS, 当前feedbackFast是因为lrqFull导致的replay
   io.feedbackFast.bits.sourceType := RSFeedbackType.lrqFull
+  // load前面的store数据没回来 等它有数据了再发store 用这idx来唤醒load
   io.feedbackFast.bits.dataInvalidSqIdx := DontCare
 
+  // 如果没有发生feedbackFast, 则可以继续写回
+  // 对于hw预取也不需要写回
+  // 对于软件预取需要写回, 因为是这条指令需要从ROB中提交
   io.out.valid := io.in.valid && !io.feedbackFast.valid && !s2_is_hw_prefetch // hardware prefetch flow should not be writebacked 
   // write_lq_safe is needed by dup logic
   // io.write_lq_safe := !s2_tlb_miss && !s2_data_invalid
   // Inst will be canceled in store queue / lsq,
   // so we do not need to care about flush in load / store unit's out.valid
+  // 把input透传给S3, 后面会对个别信号进行重新赋值
   io.out.bits := io.in.bits
   // io.out.bits.data := rdataPartialLoad
+  // 数据在S3生成
   io.out.bits.data := 0.U // data will be generated in load_s3
   // when exception occurs, set it to not miss and let it write back to rob (via int port)
   if (EnableFastForward) {
@@ -757,11 +817,14 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
       !s2_is_prefetch &&
       !s2_mmio
   } else {
+    // 如果发生了异常, 即使这个请求发生了dcache miss, 也标记为hit
+    // 目的是为了让其写回rob
     io.out.bits.miss := s2_cache_miss &&
       !s2_exception &&
       !s2_is_prefetch &&
       !s2_mmio
   }
+  // 如果是浮点load, 只有在s2没有发生异常情况下才允许写回寄存器堆和csr
   io.out.bits.uop.ctrl.fpWen := io.in.bits.uop.ctrl.fpWen && !s2_exception
 
   // val s2_loadDataFromDcache = new LoadDataFromDcacheBundle
@@ -776,18 +839,21 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   // s2_loadDataFromDcache.forwardData_mshr := io.forwardData_mshr
   // s2_loadDataFromDcache.forward_result_valid := io.forward_result_valid
   // io.loadDataFromDcache := RegEnable(s2_loadDataFromDcache, io.in.valid)
+  //把dcache返回的数据和store queue/store buffer中forward数据打一拍送到S3
   io.loadDataFromDcache.respDcacheData := io.dcacheResp.bits.data_delayed
   io.loadDataFromDcache.forwardMask := RegEnable(forwardMask, io.in.valid)
   io.loadDataFromDcache.forwardData := RegEnable(forwardData, io.in.valid)
   io.loadDataFromDcache.uop := RegEnable(io.out.bits.uop, io.in.valid)
   io.loadDataFromDcache.addrOffset := RegEnable(s2_paddr(2, 0), io.in.valid)
   // forward D or mshr
+  // 把从tileLink和mshr中forward数据打一拍送到S3进行处理
   io.loadDataFromDcache.forward_D := RegEnable(io.forward_D, io.in.valid)
   io.loadDataFromDcache.forwardData_D := RegEnable(io.forwardData_D, io.in.valid)
   io.loadDataFromDcache.forward_mshr := RegEnable(io.forward_mshr, io.in.valid)
   io.loadDataFromDcache.forwardData_mshr := RegEnable(io.forwardData_mshr, io.in.valid)
   io.loadDataFromDcache.forward_result_valid := RegEnable(io.forward_result_valid, io.in.valid)
 
+  // 该信号没有使用. 只有不是mmio且不是软硬件预取指令且不发生tlb miss的指令才能从fetch重新取指令执行
   io.s2_can_replay_from_fetch := !s2_mmio && !s2_is_prefetch && !s2_tlb_miss
   // if forward fail, replay this inst from fetch
   val debug_forwardFailReplay = s2_forward_fail && !s2_mmio && !s2_is_prefetch && !s2_tlb_miss
@@ -795,7 +861,9 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   val debug_ldldVioReplay = false.B // s2_ldld_violation && !s2_mmio && !s2_is_prefetch && !s2_tlb_miss
   // io.out.bits.uop.ctrl.replayInst := false.B
 
+
   io.out.bits.mmio := s2_mmio
+  //TODO: 由于early wakeup是load_s1产生的, 在loadS2发送到RS, 但是S2发现是mmio指令, 则需要flushPipe
   io.out.bits.uop.ctrl.flushPipe := io.sentFastUop && s2_mmio // remove io.sentFastUop
   io.out.bits.uop.cf.exceptionVec := s2_exception_vec // cache error not included
 
@@ -811,6 +879,8 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   io.dataForwarded := s2_cache_miss && !s2_exception &&
     (fullForward || RegNext(io.csrCtrl.cache_error_enable) && s2_cache_tag_error)
   // io.out.bits.forwardX will be send to lq
+  // TODO: 为什么loadDataFromDcache中的forwardMask要打一拍, 这里不需要? 因为io.out后面会整体打一拍
+  // 而且这两个信号相同, 传递两次是有冗余的.
   io.out.bits.forwardMask := forwardMask
   // data from dcache is not included in io.out.bits.forwardData
   io.out.bits.forwardData := forwardData
@@ -830,8 +900,10 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   io.out.bits.replayInfo.cause(LoadReplayCauses.bankConflict) := s2_bank_conflict && !s2_mmio && !s2_is_prefetch
   io.out.bits.replayInfo.cause(LoadReplayCauses.dcacheMiss) := io.out.bits.miss 
   if (EnableFastForward) {
+    // 只要store queue和store buffer中有, 则立刻replay
     io.out.bits.replayInfo.cause(LoadReplayCauses.dcacheReplay) := s2_cache_replay && !s2_is_prefetch && !s2_mmio && !s2_exception && !fullForward
   }else {
+    // 只有在dcache miss且没有异常的情况下, 才replay
     io.out.bits.replayInfo.cause(LoadReplayCauses.dcacheReplay) := s2_cache_replay && !s2_is_prefetch && !s2_mmio && !s2_exception && !io.dataForwarded
   }
   io.out.bits.replayInfo.cause(LoadReplayCauses.forwardFail) := s2_data_invalid && !s2_mmio && !s2_is_prefetch
@@ -851,6 +923,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   if (EnableFastForward) {
     io.s2_dcache_require_replay := s2_cache_replay && !fullForward
   } else {
+    // 由于s2_need_replay_from_rs为false, 这里结果始终为false
     io.s2_dcache_require_replay := s2_cache_replay && 
       s2_need_replay_from_rs &&
       !io.dataForwarded &&
@@ -881,6 +954,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   with HasCircularQueuePtrHelper
 {
   val io = IO(new Bundle() {
+    // TODO: 这里loadIn是input, 为什么还要用Flipped, 产生的Verilog也是Input
     val loadIn = Flipped(Decoupled(new ExuInput))
     val loadOut = Decoupled(new ExuOutput)
     val rsIdx = Input(UInt())
@@ -940,38 +1014,68 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   val load_s2 = Module(new LoadUnit_S2)
 
   // load s0
+  // 把从RS拿到的uop送给S0
   load_s0.io.in <> io.loadIn
+  // 把S0的tlb请求送给MMU
   load_s0.io.dtlbReq <> io.tlb.req
+  // 把S0的dcacheReq请求送给Dcache
   load_s0.io.dcacheReq <> io.dcache.req
   load_s0.io.rsIdx := io.rsIdx
+  // RS会告诉uop是不是第一次发射, 告诉S0
   load_s0.io.isFirstIssue <> io.isFirstIssue
   load_s0.io.s0_kill := false.B
+  // 把从loadQueueReplay中发出的请求给load_S0
   load_s0.io.replay <> io.replay
   // hareware prefetch to l1
+  // 把SMS预取器的预取请求送到s0, 目前默认SMS送到s0的信号都是invalid
   load_s0.io.prefetch_in <> io.prefetch_req
+  // load_s0如果接收的是replay指令，dcache的替换算法已经更新过了，这里通知dcache不需要再次更新替换算法
   io.dcache.replacementUpdated := load_s0.io.replacementUpdated
+  // 把s3返回的fastReplayIn接入s0
   load_s0.io.fastReplay <> io.fastReplayIn
 
   // we try pointerchasing if lfsrc_l2lForward_select condition is satisfied
   val s0_tryPointerChasing = load_s0.io.l2lForward_select
+  // 计算发生ld2ld后的第二个ld访存地址,
+  // +&是Verilog HDL中的一种运算符，表示无符号整数的加法运算, 并将结果扩展为更高的位数。
+  // 将一个指针地址的低6位和一个偏移量相加,这个偏移量是下一条ld的imm，得到一个新的指针地址
+  // 例子: load x1, [Addr]; load x2, [x1 + imm]
+  // 这里的io.fastpathIn.data就是x1寄存器, loadFastImm就是imm
+  // s0_pointerChasingVAddr就是load x2, [x1 + imm]的真实访存VA
+  // 因为时序原因导致的adder只能支持到6个bit, 太大会导致时序变差
   val s0_pointerChasingVAddr = io.fastpathIn.data(5, 0) +& io.loadFastImm(5, 0)
+  // val s0_pointerChasingVAddr = io.fastpathIn.data(11, 0) +& io.loadFastImm(11, 0)
   load_s0.io.fastpath.valid := io.fastpathIn.valid
+  //把当前这条ld指令的目的寄存器和下一条指令的imm拼起来, 生成下一条ld访存地址
+  // fastpath.data会赋值给s0_vaddr
   load_s0.io.fastpath.data := Cat(io.fastpathIn.data(XLEN-1, 6), s0_pointerChasingVAddr(5,0))
 
+  // 把s0和s1连起来
+  // left, right, rightOutFire, isFlush, block
   val s1_data = PipelineConnect(load_s0.io.out, load_s1.io.in, true.B,
     load_s0.io.out.bits.uop.robIdx.needFlush(io.redirect) && !s0_tryPointerChasing).get
 
   // load s1
   // update s1_kill when any source has valid request
+  // Reg Enable: next, init, enable
   load_s1.io.s1_kill := RegEnable(load_s0.io.s0_kill, false.B, io.loadIn.valid || io.replay.valid || io.fastpathIn.valid || load_s0.io.fastReplay.valid)
   io.tlb.req_kill := load_s1.io.s1_kill
+  // S1拿到tlb是否命中的信息
   load_s1.io.dtlbResp <> io.tlb.resp
+  // lsuPaddr是dtlbResp返回的: s1_paddr_dup_lsu = io.dtlbResp.bits.paddr(0)
   load_s1.io.lsuPAddr <> io.dcache.s1_paddr_dup_lsu
   load_s1.io.dcachePAddr <> io.dcache.s1_paddr_dup_dcache
+  // 如果dcache判断发生以下情况, 则发送dcacheKill给dcache
+  // 包括: s1_tlb_miss, s1_exception,io.s1_kill
   load_s1.io.dcacheKill <> io.dcache.s1_kill
+  // 把sbuffer的输入输出和loadS1连起来
   load_s1.io.sbuffer <> io.sbuffer
+  // 连接LSQ,用于从SQ中bypass数据; S1是送出请求，S2时获取bypass数据
   load_s1.io.lsq <> io.lsq.forward
+  // 把CSR控制信号送到load流水线
   load_s1.io.csrCtrl <> io.csrCtrl
+  // store流水线中执行的指令, 送到loadUnits中进行检查, 是否发生violation,
+  // 只在load s1和s2查询, 如果发现,触发s2_fast_replay
   load_s1.io.reExecuteQuery := io.reExecuteQuery
 
   // when S0 has opportunity to try pointerchasing, make sure it truely goes to S1
@@ -983,12 +1087,20 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   if (EnableLoadToLoadForward) {
     // Sometimes, we need to cancel the load-load forwarding.
     // These can be put at S0 if timing is bad at S1.
+    // 根本原因是adder只处理6个bit, 导致imm的(11,6)没法处理,
+    // 第二个访存地址和第一个没任何关系, 大概率VA1[12:6] != VA2[12:6]
+    // 这里的注释有问题
     // Case 0: CACHE_SET(base + offset) != CACHE_SET(base) (lowest 6-bit addition has an overflow)
+    // s1_pointerChasingVAddr = io.fastpathIn.data(5, 0) +& io.loadFastImm(5, 0)可能溢出, 导致bit 6 = 1
+    // 如果loadFastImm(11, 6)高位有1, 同上
+    // 为了load pipe s0的时序考虑, 只允许相同line里才能做ld-ld的forward
     val addressMisMatch = s1_pointerChasingVAddr(6) || RegEnable(io.loadFastImm(11, 6).orR, s0_doTryPointerChasing)
     // Case 1: the address is not 64-bit aligned or the fuOpType is not LD
     val addressNotAligned = s1_pointerChasingVAddr(2, 0).orR
     val fuOpTypeIsNotLd = io.loadIn.bits.uop.ctrl.fuOpType =/= LSUOpType.ld
     // Case 2: this is not a valid load-load pair
+    // MemBlock顶层会根据fastPathOut进行筛选，给出的load2load是否match的指示
+    // 当前uop是不是被load唤醒的
     val notFastMatch = RegEnable(!io.loadFastMatch, s0_tryPointerChasing)
     // Case 3: this load-load uop is cancelled
     val isCancelled = !io.loadIn.valid
@@ -997,16 +1109,19 @@ class LoadUnit(implicit p: Parameters) extends XSModule
       load_s1.io.in.bits.uop := io.loadIn.bits.uop
       load_s1.io.in.bits.rsIdx := io.rsIdx
       val spec_vaddr = s1_data.vaddr
+      // 这里是通过load真正发出的地址, 计算访存地址, 去掉低3bit
       val vaddr = Cat(spec_vaddr(VAddrBits - 1, 6), s1_pointerChasingVAddr(5, 3), 0.U(3.W))
       load_s1.io.in.bits.vaddr := vaddr
       load_s1.io.in.bits.isFirstIssue := io.isFirstIssue
       // We need to replace vaddr(5, 3).
+      // TODO: 为什么把PA的(5, 3)用VA替换?
       val spec_paddr = io.tlb.resp.bits.paddr(0)
       load_s1.io.dtlbResp.bits.paddr.foreach(_ := Cat(spec_paddr(PAddrBits - 1, 6), s1_pointerChasingVAddr(5, 3), 0.U(3.W)))
       // recored tlb time when get the data to ensure the correctness of the latency calculation (although it should not record in here, because it does not use tlb)
       load_s1.io.in.bits.uop.debugInfo.tlbFirstReqTime := GTimer()
       load_s1.io.in.bits.uop.debugInfo.tlbRespTime := GTimer()
     }
+
     when (cancelPointerChasing) {
       load_s1.io.s1_kill := true.B
     }.otherwise {
@@ -1028,11 +1143,15 @@ class LoadUnit(implicit p: Parameters) extends XSModule
     XSPerfAccumulate("load_to_load_forward_fail_set_mismatch",
       cancelPointerChasing && !isCancelled && !notFastMatch && !fuOpTypeIsNotLd && !addressNotAligned && addressMisMatch)
   }
+  // 把S1和S2连起来.
   PipelineConnect(load_s1.io.out, load_s2.io.in, true.B,
     load_s1.io.out.bits.uop.robIdx.needFlush(io.redirect) || cancelPointerChasing)
 
+  // 获取从tlDchannel forward的数据, tlDchaannel中包含着返回的data, 这里是从中取出
+  // req_valid, req_mshr_id, req_paddr
   val (forward_D, forwardData_D) = io.tlDchannel.forward(load_s1.io.out.valid && load_s1.io.out.bits.forward_tlDchannel, load_s1.io.out.bits.mshrid, load_s1.io.out.bits.paddr)
 
+  // 获取从mshr forward的数据, tlDchaannel中包含着返回的data, 这里是从中取出
   io.forward_mshr.valid := load_s1.io.out.valid && load_s1.io.out.bits.forward_tlDchannel
   io.forward_mshr.mshrid := load_s1.io.out.bits.mshrid
   io.forward_mshr.paddr := load_s1.io.out.bits.paddr
@@ -1042,56 +1161,81 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   XSPerfAccumulate("successfully_forward_mshr", forward_mshr && forward_result_valid)
 
   // load s2
+  // 把从tilelink forward获取的数据给到load S2
   load_s2.io.redirect <> io.redirect
   load_s2.io.forward_D := forward_D
   load_s2.io.forwardData_D := forwardData_D
   load_s2.io.forward_result_valid := forward_result_valid
+  // 如果发生dcache conflict, dcache S2才会报告给ldu
   load_s2.io.dcacheBankConflict <> io.dcache.s2_bank_conflict
+  // 把从mshr forward获取的数据给到load S2
   load_s2.io.forward_mshr := forward_mshr
   load_s2.io.forwardData_mshr := forwardData_mshr
+  // 告诉s2, 当前uop是不是通过ld2ld bypass的
   io.s2IsPointerChasing := RegEnable(s1_tryPointerChasing && !cancelPointerChasing, load_s1.io.out.fire)
+  // 把传递给load s2的信号送到预取器进行训练
   io.prefetch_train.bits.fromLsPipelineBundle(load_s2.io.in.bits)
   // override miss bit
+  // 把送到预取器进行训练的信号, 把dcache相关的resp进行覆盖
   io.prefetch_train.bits.miss := io.dcache.resp.bits.miss
   io.prefetch_train.bits.meta_prefetch := io.dcache.resp.bits.meta_prefetch
   io.prefetch_train.bits.meta_access := io.dcache.resp.bits.meta_access
+  // 只有在不是mmio同时不是tlbmiss的情况下才会训练预取器
   io.prefetch_train.valid := load_s2.io.in.fire && !load_s2.io.out.bits.mmio && !load_s2.io.in.bits.tlbMiss
+  // 如果发生dcache kill, 送到dcache去处理
   io.dcache.s2_kill := load_s2.io.dcache_kill // to kill mmio resp which are redirected
   if (env.FPGAPlatform)
     io.dcache.s2_pc := DontCare
   else
     io.dcache.s2_pc := load_s2.io.out.bits.uop.cf.pc
+  // 把dcache的response送给ldu的S2
   load_s2.io.dcacheResp <> io.dcache.resp
+  // 把pmp的response送给ldu的S2
   load_s2.io.pmpResp <> io.pmp
+  // 把tlb返回的static_pm送给ldu的S2
   load_s2.io.static_pm := RegNext(io.tlb.resp.bits.static_pm)
+  // 连接LSQ,用于从LSQ中bypass数据; S1是送出请求，S2时获取bypass数据
   load_s2.io.lsq.forwardData <> io.lsq.forward.forwardData
   load_s2.io.lsq.forwardMask <> io.lsq.forward.forwardMask
   load_s2.io.lsq.forwardMaskFast <> io.lsq.forward.forwardMaskFast // should not be used in load_s2
   load_s2.io.lsq.dataInvalid <> io.lsq.forward.dataInvalid
   load_s2.io.lsq.matchInvalid <> io.lsq.forward.matchInvalid
   load_s2.io.lsq.addrInvalid <> io.lsq.forward.addrInvalid
+  // 连接sbuffer,用于从LSQ中bypass数据; S1是送出请求，S2时获取bypass数据
   load_s2.io.sbuffer.forwardData <> io.sbuffer.forwardData
   load_s2.io.sbuffer.forwardMask <> io.sbuffer.forwardMask
   load_s2.io.sbuffer.forwardMaskFast <> io.sbuffer.forwardMaskFast // should not be used in load_s2
   load_s2.io.sbuffer.dataInvalid <> io.sbuffer.dataInvalid // always false
   load_s2.io.sbuffer.matchInvalid <> io.sbuffer.matchInvalid
   load_s2.io.sbuffer.addrInvalid := DontCare // useless
+  // 从lsq返回的信号，通过replayInfo信号送出给RS，用来尽快唤醒RS好进行重发
   load_s2.io.dataInvalidSqIdx <> io.lsq.forward.dataInvalidSqIdx // provide dataInvalidSqIdx to make wakeup faster
   load_s2.io.addrInvalidSqIdx <> io.lsq.forward.addrInvalidSqIdx // provide addrInvalidSqIdx to make wakeup faster
   load_s2.io.csrCtrl <> io.csrCtrl
+  //在LoadS1产生的early wakeup信号, 通过S2送到保留站，表示是否已经把early wakeup发送给RS
   load_s2.io.sentFastUop := io.fastUop.valid
   load_s2.io.reExecuteQuery := io.reExecuteQuery
+  // S2对LSQ进行ld-ld的violation查询
   load_s2.io.loadLoadViolationQueryReq <> io.lsq.loadLoadViolationQuery.req
+  // S2对LSQ进行sd-ld的violation查询
   load_s2.io.storeLoadViolationQueryReq <> io.lsq.storeLoadViolationQuery.req
+  // 从load pipe传回replay信号给RS, 用于指示重发指令, 从S2发出
   load_s2.io.feedbackFast <> io.feedbackFast
+  // 如果lsq满了, 反馈信号给loadUnits, 用于触发fastReplay
   load_s2.io.lqReplayFull <> io.lqReplayFull
+  // L2在发送GrantData给L1之前的3个cycle就告诉L1，你准备提前replay吧，
+  // 我数据在3cycle后送到. 比如dcache miss，load会在loadqueuerReplay里等，
+  // l2提前发l2hint信号唤醒load，可以在load进入流水线获取dcache数据时，l2刚还给数据到load
   load_s2.io.l2Hint <> io.l2Hint
 
+  // 正常情况下, sqIdxMask是可以通过load_s0获取, 如果ld2ld情况下, 需要从loadIn获取
   // pre-calcuate sqIdx mask in s0, then send it to lsq in s1 for forwarding
   val sqIdxMaskReg = RegNext(UIntToMask(load_s0.io.s0_sqIdx.value, StoreQueueSize))
   // to enable load-load, sqIdxMask must be calculated based on loadIn.uop
   // If the timing here is not OK, load-load forwarding has to be disabled.
   // Or we calculate sqIdxMask at RS??
+  // 为了实现ld2ld的bypass, sqIdx必须是从RS中送出的, 直接拿来计算sqIdxMask
+  // 这里时序可能不好, 如果时序不好, 可以考虑在保留站中计算sqIdxMask, 直接送出来
   io.lsq.forward.sqIdxMask := sqIdxMaskReg
   if (EnableLoadToLoadForward) {
     when (s1_tryPointerChasing) {
@@ -1111,11 +1255,17 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   val forward_D_or_mshr_valid = forward_result_valid && (forward_D || forward_mshr)
   val s2_dcache_hit = io.dcache.s2_hit || forward_D_or_mshr_valid // dcache hit dup in lsu side
 
+  // 什么情况下能快速唤醒RS重新发射该uop?
+  // dcache通知ldu说目前没有读到数据,因此不能fastwakup
+  // 如果被load2load的forward kill也不允许fastwakeup
+  // dtlb回复说如果是mmio或者发生了tlb miss,则不能fastwakeup
+  // 如果从store queue中forward failed也不行
   io.fastUop.valid := RegNext(
       !io.dcache.s1_disable_fast_wakeup &&  // load fast wakeup should be disabled when dcache data read is not ready
       load_s1.io.in.valid && // valid load request
       !load_s1.io.s1_kill && // killed by load-load forwarding
       !load_s1.io.dtlbResp.bits.fast_miss && // not mmio or tlb miss, pf / af not included here
+        // TODO: 为什么forward必须满足才能fastwakeup? 后面还要求dcache hit!
       !io.lsq.forward.dataInvalidFast // forward failed
     ) && 
     !RegNext(load_s1.io.out.bits.uop.robIdx.needFlush(io.redirect)) &&
@@ -1133,6 +1283,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   load_s2.io.out.ready := true.B
   val s2_loadOutValid = load_s2.io.out.valid 
   // generate duplicated load queue data wen
+  // s2_loadValidVec会给s3_loadValidVec, 用来写loadQueue
   val s2_loadValidVec = RegInit(0.U(6.W))
   val s2_loadLeftFire = load_s1.io.out.valid && load_s2.io.in.ready
   // val write_lq_safe = load_s2.io.write_lq_safe
@@ -1161,8 +1312,10 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   // make chisel happy
   val s3_loadValidVec = Reg(UInt(6.W))
   s3_loadValidVec := s2_loadValidVec
+  // 写lq的有效bit vector
   io.lsq.loadIn.bits.lqDataWenDup := s3_loadValidVec.asBools
 
+  // 如果dcache已经更新了替换算法, 告诉LoadQueueReplay, 再发起replay的load时, 标记一下
   io.lsq.loadIn.bits.replacementUpdated := io.dcache.resp.bits.replacementUpdated
 
   // s2_dcache_require_replay signal will be RegNexted, then used in s3
@@ -1178,7 +1331,9 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   io.lsq.loadIn.bits.dcacheRequireReplay := s3_dcacheRequireReplay
 
 
+  // 如果forward时, 发生了错误, 例如va相同但是pa不同, 则需要重新取指执行(flush)
   val s3_vpMatchInvalid = RegNext(io.lsq.forward.matchInvalid || io.sbuffer.matchInvalid)
+  // 如果loadQueueRAR判断发生了ld-ld的violation, 则重新取指执行
   val s3_ldld_replayFromFetch = 
     io.lsq.loadLoadViolationQuery.resp.valid &&
     io.lsq.loadLoadViolationQuery.resp.bits.replayFromFetch &&
@@ -1193,7 +1348,8 @@ class LoadUnit(implicit p: Parameters) extends XSModule
                        s3_selReplayCause(LoadReplayCauses.tlbMiss) ||
                        s3_selReplayCause(LoadReplayCauses.waitStore)
 
-  val s3_exception = ExceptionNO.selectByFu(s3_loadOutBits.uop.cf.exceptionVec, lduCfg).asUInt.orR 
+  val s3_exception = ExceptionNO.selectByFu(s3_loadOutBits.uop.cf.exceptionVec, lduCfg).asUInt.orR
+  // 如果s3有异常, 或者发生了load error, 或者需要重新取指执行, 则没有replay, 需要清空replayInfo
   when ((s3_exception || s3_delayedLoadError || s3_replayInst) && !s3_forceReplay) { 
     io.lsq.loadIn.bits.replayInfo.cause := 0.U.asTypeOf(s3_replayInfo.cause.cloneType)
   } .otherwise {
@@ -1219,38 +1375,54 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   hitLoadOut.bits.debug.vaddr := s3_loadOutBits.vaddr
   hitLoadOut.bits.fflags := DontCare
 
+  // in-pipe st-ld violation/tlbmiss/waitStore, 这三种情况要forceReplay, 因此不需要处理异常
   when (s3_forceReplay) {
     hitLoadOut.bits.uop.cf.exceptionVec := 0.U.asTypeOf(s3_loadOutBits.uop.cf.exceptionVec.cloneType)
   }
 
   /* <------- DANGEROUS: Don't change sequence here ! -------> */
-  
+  // TODO: 从load pipe输出的uop，送到lsq
   io.lsq.loadIn.bits.uop := hitLoadOut.bits.uop
 
+  // 如果发生异常或者需要replay, 则需要告诉lsq，release相关uop
   val s3_needRelease = s3_exception || io.lsq.loadIn.bits.replayInfo.needReplay()
+  // load_s1就送出preReq, 让lsq进行violation查询, 不过目前没有真正使能
   io.lsq.loadLoadViolationQuery.preReq := load_s1.io.out.valid
   io.lsq.loadLoadViolationQuery.release := s3_needRelease
   io.lsq.storeLoadViolationQuery.preReq := load_s1.io.out.valid
   io.lsq.storeLoadViolationQuery.release := s3_needRelease
 
-  // feedback slow
+  //	（1）dcacheMiss但是L2返回hint表示当前的miss命中了L2的MSHR，这表示数据可能很快回来；
+  //	（2）s1或者s2已经判断出st-ld的violation，ld-ld violation走写回后触发flush的流程，没有in pipe replay
+  //	（3）dcache miss，但是miss queue满，需要尽快进入dcache的miss queue
+  //	（4）dcache发生bank conflict。
   s3_fast_replay := (RegNext(load_s2.io.s2_dcache_require_fast_replay) || 
                     (s3_loadOutBits.replayInfo.cause(LoadReplayCauses.dcacheMiss) && io.l2Hint.valid && io.l2Hint.bits.sourceId === s3_loadOutBits.replayInfo.missMSHRId)) && 
                     !s3_exception
+  // 如果不是in-pipe的replay, 则需要feedback给RS
   val s3_need_feedback = !s3_loadOutBits.isLoadReplay && !(s3_fast_replay && io.fastReplayOut.ready)
 
-  //
-  io.feedbackSlow.valid := s3_loadOutValid && !s3_loadOutBits.uop.robIdx.needFlush(io.redirect) && s3_need_feedback 
+  //告诉RS, 重发该指令
+  //展开s3_need_feedback后: io.feedbackSlow.valid := s3_loadOutValid && !(s3_fast_replay && io.fastReplayOut.ready) &&
+  //                                                !s3_loadOutBits.uop.robIdx.needFlush(io.redirect) && !s3_loadOutBits.isLoadReplay
+  io.feedbackSlow.valid := s3_loadOutValid && !s3_loadOutBits.uop.robIdx.needFlush(io.redirect) && s3_need_feedback
+  //如果不需要replay或者需要replay但是lsq已经接纳了该uop，则Hit=true, 告诉保留站删除该uop
   io.feedbackSlow.bits.hit := !io.lsq.loadIn.bits.replayInfo.needReplay() || io.lsq.loadIn.ready
   io.feedbackSlow.bits.flushState := s3_loadOutBits.ptwBack
   io.feedbackSlow.bits.rsIdx := s3_loadOutBits.rsIdx
   io.feedbackSlow.bits.sourceType := RSFeedbackType.lrqFull
   io.feedbackSlow.bits.dataInvalidSqIdx := DontCare
 
+  // 从s3直接写回还是从lsq写回? 如果命中(hitLoadOut.valid = true), 直接写回, 只有uncache的才会从loadOut写回
   val s3_loadWbMeta = Mux(hitLoadOut.valid, hitLoadOut.bits, io.lsq.loadOut.bits)
+
   // data from load queue refill
+  // TODO: loadOut和ldRawDataOut的区别?
+  // uncacheBuffer.io.loadOut <> io.loadOut
+  // uncacheBuffer.io.loadRawDataOut <> io.ldRawDataOut
   val s3_loadDataFromLQ = io.lsq.ldRawData
   val s3_rdataLQ = s3_loadDataFromLQ.mergedData()
+  // 从LQ中选择需要的数据
   val s3_rdataSelLQ = LookupTree(s3_loadDataFromLQ.addrOffset, List(
     "b000".U -> s3_rdataLQ(63,  0),
     "b001".U -> s3_rdataLQ(63,  8),
@@ -1264,6 +1436,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   val s3_rdataPartialLoadLQ = rdataHelper(s3_loadDataFromLQ.uop, s3_rdataSelLQ)
 
   // data from dcache hit
+  // 从dcache返回的数据中选择目标数据
   val s3_loadDataFromDcache = load_s2.io.loadDataFromDcache
   val s3_rdataDcache = s3_loadDataFromDcache.mergedData()
   val s3_rdataSelDcache = LookupTree(s3_loadDataFromDcache.addrOffset, List(
@@ -1280,10 +1453,12 @@ class LoadUnit(implicit p: Parameters) extends XSModule
 
   // FIXME: add 1 cycle delay ?
   io.loadOut.bits := s3_loadWbMeta
+  // 如果命中正常load, 则从dcache返回(包括了forward数据)
   io.loadOut.bits.data := Mux(hitLoadOut.valid, s3_rdataPartialLoadDcache, s3_rdataPartialLoadLQ)
   io.loadOut.valid := hitLoadOut.valid && !hitLoadOut.bits.uop.robIdx.needFlush(io.redirect) ||
                     io.lsq.loadOut.valid && !io.lsq.loadOut.bits.uop.robIdx.needFlush(io.redirect) && !hitLoadOut.valid
-  
+  // 这里的ready信号, 只有在dcache不输出正常数据的情况下才行
+  // 也就是dcache的数据优先级高
   io.lsq.loadOut.ready := !hitLoadOut.valid
 
   // fast load to load forward

@@ -74,6 +74,9 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     val issue = Vec(exuParameters.LsExuCnt + exuParameters.StuCnt, Flipped(DecoupledIO(new ExuInput)))
     val loadFastMatch = Vec(exuParameters.LduCnt, Input(UInt(exuParameters.LduCnt.W)))
     val loadFastImm = Vec(exuParameters.LduCnt, Input(UInt(12.W)))
+
+    // 从exuBlock返回的信号
+
     val rsfeedback = Vec(exuParameters.LsExuCnt, new MemRSFeedbackIO)
     val loadPc = Vec(exuParameters.LduCnt, Input(UInt(VAddrBits.W))) // for hw prefetch
     val stIssuePtr = Output(new SqPtr())
@@ -181,12 +184,21 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   // However, atom exception will be writebacked to rob
   // using store writeback port
 
+
+  // TODO: atomic写回端口占用了loadUnits.head的写回端口, 那么lodUnits.head的写回怎么办? 直接丢弃会不会出错?
+  // atomic指令会清空rob才dispatch，因此不会出现上述情况
+
   val loadWritebackOverride  = Mux(atomicsUnit.io.out.valid, atomicsUnit.io.out.bits, loadUnits.head.io.loadOut.bits)
   val loadOut0 = Wire(Decoupled(new ExuOutput))
   loadOut0.valid := atomicsUnit.io.out.valid || loadUnits.head.io.loadOut.valid
   loadOut0.bits  := loadWritebackOverride
   atomicsUnit.io.out.ready := loadOut0.ready
   loadUnits.head.io.loadOut.ready := loadOut0.ready
+
+  // 如果写回的是atomicsUnit, 则atmoicsUnit的异常信号是从store写回, 而不是从loadUnits写回
+  // 所以这里把loadUnits的异常向量全部清空
+  // TODO: 为什么atomic的异常是从store写回？ 因为atomic指令(例如lr)失败与否与store指令(例如sc)的执行结果相关， 与load的执行结果无关。
+
   when(atomicsUnit.io.out.valid){
     loadOut0.bits.uop.cf.exceptionVec := 0.U(16.W).asBools // exception will be writebacked via store wb port
   }
@@ -417,6 +429,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     // dtlb
     loadUnits(i).io.tlb <> dtlb_reqs.take(exuParameters.LduCnt)(i)
     // pmp
+    // 把loadUnits中访问pmp的请求送到pmp去检查，返回resp
     loadUnits(i).io.pmp <> pmp_check(i).resp
     // st-ld violation query 
     for (s <- 0 until StorePipelineWidth) {
@@ -651,6 +664,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     stData(i).valid && FuType.storeIsAMO(stData(i).bits.uop.ctrl.fuType)
   )
 
+  // TODO: 这里是否可以按pipeline区分？
   for (i <- 0 until exuParameters.StuCnt) when(st_atomics(i)) {
     io.issue(atomic_rs(i)).ready := atomicsUnit.io.in.ready
     storeUnits(i).io.stin.valid := false.B

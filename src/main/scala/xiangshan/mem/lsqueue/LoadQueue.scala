@@ -192,11 +192,17 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     val l2Hint = Input(Valid(new L2ToL1Hint()))
   })
 
+  // 判断是否发生load-load violation
   val loadQueueRAR = Module(new LoadQueueRAR)  //  read-after-read violation
+  // 判断是否发生store-load violation
   val loadQueueRAW = Module(new LoadQueueRAW)  //  read-after-write violation
+  // 走完loadPipe后, 有些场景需要uop重新执行, 会放到这里伺机发起replay, 送到stage 0(replay)
   val loadQueueReplay = Module(new LoadQueueReplay)  //  enqueue if need replay
-  val virtualLoadQueue = Module(new VirtualLoadQueue)  //  control state 
+  // dispatch时分配, 用来维护lqIdx, issue的ld会enqueue, 写回的ld会deq
+  val virtualLoadQueue = Module(new VirtualLoadQueue)  //  control state
+  // exception
   val exceptionBuffer = Module(new LqExceptionBuffer) // exception buffer
+  // uncache
   val uncacheBuffer = Module(new UncacheBuffer) // uncache buffer
 
   /**
@@ -204,6 +210,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    */  
   loadQueueRAR.io.redirect <> io.redirect
   loadQueueRAR.io.release <> io.release
+  // 把loadQueue中的deqPtr给loadQueueRAR， 后者用来判断是否释放资源
   loadQueueRAR.io.ldWbPtr <> virtualLoadQueue.io.ldWbPtr
   for (w <- 0 until LoadPipelineWidth) {
     loadQueueRAR.io.query(w).req <> io.ldu.loadLoadViolationQuery(w).req // from load_s1
@@ -217,10 +224,12 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    */  
   loadQueueRAW.io.redirect <> io.redirect 
   loadQueueRAW.io.storeIn <> io.sta.storeAddrIn
+  // 对于地址已经ready的store指令, 把其指针给到loadQueueRAW, 用来释放比其年轻的load
   loadQueueRAW.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr
+  // loadQueue用来与stAddrReadySqPtr比较, 如果相等, 则说明loadQueueRAW不需要继续寻找是否有load需要释放
   loadQueueRAW.io.stIssuePtr <> io.sq.stIssuePtr
   for (w <- 0 until LoadPipelineWidth) {
-    loadQueueRAW.io.query(w).req <> io.ldu.storeLoadViolationQuery(w).req // from load_s1
+    loadQueueRAW.io.query(w).req <> io.ldu.storeLoadViolationQuery(w).req // from load_s2
     loadQueueRAW.io.query(w).resp <> io.ldu.storeLoadViolationQuery(w).resp // to load_s2
     loadQueueRAW.io.query(w).preReq := io.ldu.storeLoadViolationQuery(w).preReq // from load_s1
     loadQueueRAW.io.query(w).release := io.ldu.storeLoadViolationQuery(w).release // from load_s3

@@ -387,6 +387,7 @@ class SramedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
 
   val perf_multi_read = PopCount(io.read.map(_.valid)) >= 2.U
   (0 until LoadPipelineWidth).foreach(i => {
+    // 对于ldu0和ldu1发生的bank conflict，默认
     io.bank_conflict_fast(i) := wr_bank_conflict(i) || rrl_bank_conflict(i) ||
       (if (i == 0) 0.B else (0 until i).map(rr_bank_conflict(_)(i)).reduce(_ || _))
     io.bank_conflict_slow(i) := RegNext(io.bank_conflict_fast(i))

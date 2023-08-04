@@ -322,6 +322,7 @@ class SchedulerImp(outer: Scheduler) extends LazyModuleImp(outer) with HasXSPara
       pregAlloc.valid := allocReq.isInt
       pregAlloc.bits := allocReq.preg
     }
+    // 写回的寄存器要通知busyTable进行回收
     busyTable.io.wbPregs.zip(io.writeback.take(intRfWritePorts)).foreach{ case (pregWb, exuWb) =>
       pregWb.valid := exuWb.valid && exuWb.bits.uop.ctrl.rfWen
       pregWb.bits := exuWb.bits.uop.pdest

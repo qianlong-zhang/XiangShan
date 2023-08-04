@@ -146,6 +146,9 @@ class Dispatch2RsLessExuImp(outer: Dispatch2Rs)(implicit p: Parameters) extends 
   // srcState is read from outside and connected directly
   if (io.readIntState.isDefined) {
     val intSrcStateVec = io.out.flatMap(_.bits.srcState.take(numIntSrc))
+    // 把从busyTable中读取的寄存器状态, 给到srcState.
+    // 如果busyTable中对于某个preg的req是true
+    // 则读取时对应的resp=false(!table(req), 则srcState = false
     io.readIntState.get.map(_.resp).zip(intSrcStateVec).foreach(x => x._2 := x._1)
     for (i <- 0 until outer.numOut) {
       val pairState = io.readIntState.get.slice(numIntSrc * pairIndex(i), numIntSrc * pairIndex(i) + numIntSrc)
