@@ -103,10 +103,12 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val storeQueue = Module(new StoreQueue)
 
   storeQueue.io.hartId := io.hartId
+  // 目前该属性通过csr控制,默认关闭, 用来控制对于uncache的访问是否允许乱序执行
   storeQueue.io.uncacheOutstanding := io.uncacheOutstanding
-  
 
   dontTouch(loadQueue.io.tlbReplayDelayCycleCtrl)
+  // 用来控制对于发生tlbmiss的情况, 延迟多少latency后发起uop的replay
+  // TODO: 这个latency时间是如何确定的? 看起来很随机
   val tlbReplayDelayCycleCtrl = WireInit(VecInit(Seq(14.U(ReSelectLen.W), 0.U(ReSelectLen.W), 125.U(ReSelectLen.W), 0.U(ReSelectLen.W))))
   loadQueue.io.tlbReplayDelayCycleCtrl := tlbReplayDelayCycleCtrl
 
@@ -116,20 +118,27 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   io.enq.canAccept := loadQueue.io.enq.canAccept && storeQueue.io.enq.canAccept
   io.lqCanAccept := loadQueue.io.enq.canAccept
   io.sqCanAccept := storeQueue.io.enq.canAccept
+  // loadQueue中也有对于storeQueue的控制信号, 用来在virtualLoadQueue内部计算enQueue指针
+  // 只有在storeQueue也能接收新uop时, loadQueue中的enqPtr才会更新
   loadQueue.io.enq.sqCanAccept := storeQueue.io.enq.canAccept
   storeQueue.io.enq.lqCanAccept := loadQueue.io.enq.canAccept
   for (i <- io.enq.req.indices) {
+    // 在Dispatch2RS.scala中对needAlloc赋值, 其中定义了needAlloc是2bit数,
+    // 对于非load store=0b00; 对于store且不是amo=0b10, 对于其他(load或者amo)=0b01;
+    // 如果bit0=0, 说明是非load store或者是store, 则loadQueue不需要alloc
     loadQueue.io.enq.needAlloc(i)      := io.enq.needAlloc(i)(0)
     loadQueue.io.enq.req(i).valid      := io.enq.needAlloc(i)(0) && io.enq.req(i).valid
     loadQueue.io.enq.req(i).bits       := io.enq.req(i).bits
     loadQueue.io.enq.req(i).bits.sqIdx := storeQueue.io.enq.resp(i)
 
+    // bit1如果=1, 说明是store且不是amo, 则storeQueue需要alloc
     storeQueue.io.enq.needAlloc(i)      := io.enq.needAlloc(i)(1)
     storeQueue.io.enq.req(i).valid      := io.enq.needAlloc(i)(1) && io.enq.req(i).valid
     storeQueue.io.enq.req(i).bits       := io.enq.req(i).bits
     storeQueue.io.enq.req(i).bits       := io.enq.req(i).bits
     storeQueue.io.enq.req(i).bits.lqIdx := loadQueue.io.enq.resp(i)
 
+    // enq的同时,给出lqIdx
     io.enq.resp(i).lqIdx := loadQueue.io.enq.resp(i)
     io.enq.resp(i).sqIdx := storeQueue.io.enq.resp(i)
   }
@@ -185,6 +194,8 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   // s2:               exception triggered
   // s3: ptr updated & new address
   // address will be used at the next cycle after exception is triggered
+  // TODO: LSQ的异常地址是req进入后3cycle给出的， req是LoadS3进入，LoadS3+1是Commit，LoadS3+2是exception find
+  // LoadS3+3给出exceptionAddr
   io.exceptionAddr.vaddr := Mux(RegNext(io.exceptionAddr.isStore), storeQueue.io.exceptionAddr.vaddr, loadQueue.io.exceptionAddr.vaddr)
   io.issuePtrExt := storeQueue.io.stAddrReadySqPtr
 
@@ -220,9 +231,11 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   }.otherwise{
     io.uncache.req <> storeQueue.io.uncache.req
   }
+  // 如果支持uncacheOutStanding,则uncache的resp只来源于loadQueue
   when (io.uncacheOutstanding) {
     io.uncache.resp <> loadQueue.io.uncache.resp  
   } .otherwise {
+    // 如果不支持uncacheOutStanding,则uncache的resp根据情况连接
     when(pendingstate === s_load){
       io.uncache.resp <> loadQueue.io.uncache.resp
     }.otherwise{

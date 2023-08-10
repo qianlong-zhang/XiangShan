@@ -210,6 +210,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents {
   // this instruction can actually dequeue: 3 conditions
   // (1) resources are ready
   // (2) previous instructions are ready
+  // (3) ROB可以接收新指令
   val thisCanActualOut = (0 until RenameWidth).map(i => !thisIsBlocked(i) && notBlockedByPrevious(i))
   val thisActualOut = (0 until RenameWidth).map(i => io.enqRob.req(i).valid && io.enqRob.canAccept)
   val hasValidException = io.fromRename.zip(hasException).map(x => x._1.valid && x._2)

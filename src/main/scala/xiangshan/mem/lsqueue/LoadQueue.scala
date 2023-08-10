@@ -213,8 +213,9 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   // 把loadQueue中的deqPtr给loadQueueRAR， 后者用来判断是否释放资源
   loadQueueRAR.io.ldWbPtr <> virtualLoadQueue.io.ldWbPtr
   for (w <- 0 until LoadPipelineWidth) {
-    loadQueueRAR.io.query(w).req <> io.ldu.loadLoadViolationQuery(w).req // from load_s1
+    loadQueueRAR.io.query(w).req <> io.ldu.loadLoadViolationQuery(w).req // from load_s2
     loadQueueRAR.io.query(w).resp <> io.ldu.loadLoadViolationQuery(w).resp // to load_s2
+    // preReq没有使用
     loadQueueRAR.io.query(w).preReq := io.ldu.loadLoadViolationQuery(w).preReq // from load_s1
     loadQueueRAR.io.query(w).release := io.ldu.loadLoadViolationQuery(w).release // from load_s3
   }
@@ -230,7 +231,8 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   loadQueueRAW.io.stIssuePtr <> io.sq.stIssuePtr
   for (w <- 0 until LoadPipelineWidth) {
     loadQueueRAW.io.query(w).req <> io.ldu.storeLoadViolationQuery(w).req // from load_s2
-    loadQueueRAW.io.query(w).resp <> io.ldu.storeLoadViolationQuery(w).resp // to load_s2
+    //这里的resp根本没有连, 对于st-load的violation输出的是rollback信号
+    loadQueueRAW.io.query(w).resp <> io.ldu.storeLoadViolationQuery(w).resp // to load_s3
     loadQueueRAW.io.query(w).preReq := io.ldu.storeLoadViolationQuery(w).preReq // from load_s1
     loadQueueRAW.io.query(w).release := io.ldu.storeLoadViolationQuery(w).release // from load_s3
   }
@@ -239,6 +241,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    * VirtualLoadQueue
    */  
   virtualLoadQueue.io.redirect <> io.redirect
+  // dispatch2RS出来的io.enq 先打一拍, 进入LSQWrapper后又打了一拍
   virtualLoadQueue.io.enq <> io.enq 
   virtualLoadQueue.io.loadIn <> io.ldu.loadIn // from load_s3
   virtualLoadQueue.io.lqFull <> io.lqFull
@@ -289,6 +292,10 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     }
   }
 
+  // 对于发生rollback的情况，从中选择一个最老的
+  // rollback可能因为st-load violation导致,也可能由于uncache访问导致
+  // 把从loadQueue中拿到的是否发生memoryViolation信号送出去(ctrlBlock)处理，
+  // ctrlBlock会基于该信号从redirectGen模块中产生flush信号
   val (rollbackSelV, rollbackSelBits) = selectOldest(
                                           Seq(loadQueueRAW.io.rollback.valid, uncacheBuffer.io.rollback.valid), 
                                           Seq(loadQueueRAW.io.rollback.bits, uncacheBuffer.io.rollback.bits)

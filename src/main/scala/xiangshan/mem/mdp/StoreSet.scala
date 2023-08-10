@@ -372,6 +372,11 @@ class LFST(implicit p: Parameters) extends XSModule {
         io.dispatch.req(i).valid &&
         (!io.dispatch.req(i).bits.isstore || io.csrCtrl.storeset_wait_store)
       ) && !io.csrCtrl.lvpred_disable || io.csrCtrl.no_spec_load
+    // 假设有几个store是当前load依赖的, 年轻的store发射走了, 但是更年老的store没有发射，
+    // load此时判断其依赖的robIdx已经走了, 认为自己已经可以发射了, 这种情况可能导致violation
+    // 不过即使发生上述问题, 连续发生两次violation后, 就会导致load store两条指令对应的ssid相同, 以后就会把strict bit拉高,
+    // 再往后这条load就需要等待前面store全部执行完才行了.
+    // TODO: 给出的allocPtr可能是invalid, 因为这里没有判断allocPtr当前是否valid
     io.dispatch.resp(i).bits.robIdx := robIdxVec(io.dispatch.req(i).bits.ssid)(allocPtr(io.dispatch.req(i).bits.ssid)-1.U)
     if(i > 0){
       (0 until i).map(j =>
