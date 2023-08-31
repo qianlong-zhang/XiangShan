@@ -158,48 +158,27 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   /**
    * LoadQueueRAW
    */
-<<<<<<< Updated upstream
-  loadQueueRAW.io.redirect <> io.redirect
-  loadQueueRAW.io.storeIn <> io.sta.storeAddrIn // from sta S1
+  loadQueueRAW.io.redirect         <> io.redirect
+  loadQueueRAW.io.storeIn          <> io.sta.storeAddrIn
   // 对于地址已经ready的store指令, 把其指针给到loadQueueRAW, 用来释放比其年轻的load
   loadQueueRAW.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr
   // loadQueue用来与stAddrReadySqPtr比较, 如果相等, 则说明loadQueueRAW不需要继续寻找是否有load需要释放
-  loadQueueRAW.io.stIssuePtr <> io.sq.stIssuePtr
-  for (w <- 0 until LoadPipelineWidth) {
-    loadQueueRAW.io.query(w).req <> io.ldu.storeLoadViolationQuery(w).req // from load_s2
-    //这里的resp根本没有连, 对于st-load的violation输出的是rollback信号
-    loadQueueRAW.io.query(w).resp <> io.ldu.storeLoadViolationQuery(w).resp // to load_s3
-    loadQueueRAW.io.query(w).preReq := io.ldu.storeLoadViolationQuery(w).preReq // from load_s1
-    loadQueueRAW.io.query(w).release := io.ldu.storeLoadViolationQuery(w).release // from load_s3
-=======
-  loadQueueRAW.io.redirect         <> io.redirect
-  loadQueueRAW.io.storeIn          <> io.sta.storeAddrIn
-  loadQueueRAW.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr
   loadQueueRAW.io.stIssuePtr       <> io.sq.stIssuePtr
   for (w <- 0 until LoadPipelineWidth) {
     loadQueueRAW.io.query(w).req    <> io.ldu.stld_nuke_query(w).req // from load_s1
+    //这里的resp根本没有连, 对于st-load的violation输出的是rollback信号
     loadQueueRAW.io.query(w).resp   <> io.ldu.stld_nuke_query(w).resp // to load_s2
     loadQueueRAW.io.query(w).revoke := io.ldu.stld_nuke_query(w).revoke // from load_s3
->>>>>>> Stashed changes
   }
 
   /**
    * VirtualLoadQueue
    */
-<<<<<<< Updated upstream
-  virtualLoadQueue.io.redirect <> io.redirect
-  // dispatch2RS出来的io.enq 先打一拍, 进入LSQWrapper后又打了一拍
-  virtualLoadQueue.io.enq <> io.enq
-  virtualLoadQueue.io.loadIn <> io.ldu.loadIn // from load_s3
-  virtualLoadQueue.io.lqFull <> io.lqFull
-  virtualLoadQueue.io.lqDeq <> io.lqDeq
-=======
   virtualLoadQueue.io.redirect    <> io.redirect
   virtualLoadQueue.io.enq         <> io.enq
   virtualLoadQueue.io.ldin        <> io.ldu.ldin // from load_s3
   virtualLoadQueue.io.lqFull      <> io.lqFull
   virtualLoadQueue.io.lqDeq       <> io.lqDeq
->>>>>>> Stashed changes
   virtualLoadQueue.io.lqCancelCnt <> io.lqCancelCnt
 
   /**

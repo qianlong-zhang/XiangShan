@@ -106,10 +106,6 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   // canEnqueue实际是queryReqValid
   val canEnqueue = io.query.map(_.req.valid)
   val cancelEnqueue = io.query.map(_.req.bits.uop.robIdx.needFlush(io.redirect))
-<<<<<<< Updated upstream
-  // 如果enqPtr(stIssuePtr) == ready store指令的最老的那一条
-=======
->>>>>>> Stashed changes
   val allAddrCheck = io.stIssuePtr === io.stAddrReadySqPtr
   // 对于query的load指令, 用其自带的sqIdx与stAddrReadySqPtr进行比对
   // 如果发现load中的sqIdx都比stAddrReadySqPtr年轻, 则不需要进行enqueue操作

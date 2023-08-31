@@ -250,12 +250,9 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     // credit不起作用, 始终是0
     selBlocked(i) := creditUpdate(i) =/= 0.U(ReSelectLen.W) || credit(i) =/= 0.U(ReSelectLen.W)
   })
-<<<<<<< Updated upstream
 
   // TODO: 这里缺一句: credit := creditUpdate
 
-=======
->>>>>>> Stashed changes
   val replayCarryReg = RegInit(VecInit(List.fill(LoadQueueReplaySize)(ReplayCarry(nWays, 0.U, false.B))))
   val dataInLastBeatReg = RegInit(VecInit(List.fill(LoadQueueReplaySize)(false.B)))
 
@@ -296,15 +293,11 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   for (i <- 0 until LoadQueueReplaySize) {
     // dequeue
     //  FIXME: store*Ptr is not accurate
-<<<<<<< Updated upstream
     // 如果stDataReadySqPtr比blockSqIdx老或者相等 || 如果stDataReady || 如果storeQueue空
     // 则说明store data 已经ready, 可以尝试重新发射那些等待store数据写回的load指令(forward fail)
     dataNotBlockVec(i) := !isBefore(io.stDataReadySqPtr, blockSqIdx(i)) || stDataReadyVec(blockSqIdx(i).value) || io.sqEmpty // for better timing
     // 如果stAddrReadySqPtr比blockSqIdx老或者相等 || 如果stAddrReady || 如果storeQueue空
     // 则说明store地址已经ready, 可以尝试重新发射那些等待store地址写回的load指令
-=======
-    dataNotBlockVec(i) := !isBefore(io.stDataReadySqPtr, blockSqIdx(i)) || stDataReadyVec(blockSqIdx(i).value) || io.sqEmpty // for better timing
->>>>>>> Stashed changes
     addrNotBlockVec(i) := !isBefore(io.stAddrReadySqPtr, blockSqIdx(i)) || stAddrReadyVec(blockSqIdx(i).value) || io.sqEmpty // for better timing
 
     // store address execute
