@@ -260,7 +260,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       deqPtrExtNext(0) // for mmio insts, deqPtr may be ahead of cmtPtr
     )
   }
+<<<<<<< Updated upstream
   // 表示ready store指令的最老的那一条
+=======
+
+>>>>>>> Stashed changes
   io.stAddrReadySqPtr := addrReadyPtrExt
 
   // update

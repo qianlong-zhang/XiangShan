@@ -473,6 +473,16 @@ class SramedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
       }
     }
   }
+  
+  val data_read_oh = WireInit(VecInit(Seq.fill(DCacheSetDiv * DCacheBanks * DCacheWays)(0.U(1.W))))
+  for(div_index <- 0 until DCacheSetDiv){
+    for (bank_index <- 0 until DCacheBanks) {
+      for (way_index <- 0 until DCacheWays) {
+        data_read_oh(div_index *  DCacheBanks * DCacheWays + bank_index * DCacheBanks + way_index) := data_banks(div_index)(bank_index)(way_index).io.r.en
+      }
+    }
+  }
+  XSPerfAccumulate("data_read_counter", PopCount(Cat(data_read_oh)))
 
   val data_read_oh = WireInit(VecInit(Seq.fill(DCacheSetDiv * DCacheBanks * DCacheWays)(0.U(1.W))))
   for(div_index <- 0 until DCacheSetDiv){

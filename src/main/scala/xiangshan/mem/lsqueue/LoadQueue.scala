@@ -142,24 +142,23 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   /**
    * LoadQueueRAR
    */
-  loadQueueRAR.io.redirect <> io.redirect
   // 这里的release与query请求中带的release区别是，
   // 从query中带的release：如果发生异常或者需要replay, 则需要告诉lsq，release相关uop
   // 这里的release是dcache中的cacheline被替换掉时发过来的
-  loadQueueRAR.io.release <> io.release
   // 把loadQueue中的deqPtr给loadQueueRAR， 后者用来判断是否释放资源
-  loadQueueRAR.io.ldWbPtr <> virtualLoadQueue.io.ldWbPtr
+  loadQueueRAR.io.redirect <> io.redirect
+  loadQueueRAR.io.release  <> io.release
+  loadQueueRAR.io.ldWbPtr  <> virtualLoadQueue.io.ldWbPtr
   for (w <- 0 until LoadPipelineWidth) {
-    loadQueueRAR.io.query(w).req <> io.ldu.loadLoadViolationQuery(w).req // from load_s2
-    loadQueueRAR.io.query(w).resp <> io.ldu.loadLoadViolationQuery(w).resp // to load_s2
-    // preReq没有使用
-    loadQueueRAR.io.query(w).preReq := io.ldu.loadLoadViolationQuery(w).preReq // from load_s1
-    loadQueueRAR.io.query(w).release := io.ldu.loadLoadViolationQuery(w).release // from load_s3
+    loadQueueRAR.io.query(w).req    <> io.ldu.ldld_nuke_query(w).req // from load_s1
+    loadQueueRAR.io.query(w).resp   <> io.ldu.ldld_nuke_query(w).resp // to load_s2
+    loadQueueRAR.io.query(w).revoke := io.ldu.ldld_nuke_query(w).revoke // from load_s3
   }
 
   /**
    * LoadQueueRAW
    */
+<<<<<<< Updated upstream
   loadQueueRAW.io.redirect <> io.redirect
   loadQueueRAW.io.storeIn <> io.sta.storeAddrIn // from sta S1
   // 对于地址已经ready的store指令, 把其指针给到loadQueueRAW, 用来释放比其年轻的load
@@ -172,17 +171,35 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     loadQueueRAW.io.query(w).resp <> io.ldu.storeLoadViolationQuery(w).resp // to load_s3
     loadQueueRAW.io.query(w).preReq := io.ldu.storeLoadViolationQuery(w).preReq // from load_s1
     loadQueueRAW.io.query(w).release := io.ldu.storeLoadViolationQuery(w).release // from load_s3
+=======
+  loadQueueRAW.io.redirect         <> io.redirect
+  loadQueueRAW.io.storeIn          <> io.sta.storeAddrIn
+  loadQueueRAW.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr
+  loadQueueRAW.io.stIssuePtr       <> io.sq.stIssuePtr
+  for (w <- 0 until LoadPipelineWidth) {
+    loadQueueRAW.io.query(w).req    <> io.ldu.stld_nuke_query(w).req // from load_s1
+    loadQueueRAW.io.query(w).resp   <> io.ldu.stld_nuke_query(w).resp // to load_s2
+    loadQueueRAW.io.query(w).revoke := io.ldu.stld_nuke_query(w).revoke // from load_s3
+>>>>>>> Stashed changes
   }
 
   /**
    * VirtualLoadQueue
    */
+<<<<<<< Updated upstream
   virtualLoadQueue.io.redirect <> io.redirect
   // dispatch2RS出来的io.enq 先打一拍, 进入LSQWrapper后又打了一拍
   virtualLoadQueue.io.enq <> io.enq
   virtualLoadQueue.io.loadIn <> io.ldu.loadIn // from load_s3
   virtualLoadQueue.io.lqFull <> io.lqFull
   virtualLoadQueue.io.lqDeq <> io.lqDeq
+=======
+  virtualLoadQueue.io.redirect    <> io.redirect
+  virtualLoadQueue.io.enq         <> io.enq
+  virtualLoadQueue.io.ldin        <> io.ldu.ldin // from load_s3
+  virtualLoadQueue.io.lqFull      <> io.lqFull
+  virtualLoadQueue.io.lqDeq       <> io.lqDeq
+>>>>>>> Stashed changes
   virtualLoadQueue.io.lqCancelCnt <> io.lqCancelCnt
 
   /**

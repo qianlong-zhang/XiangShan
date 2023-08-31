@@ -59,9 +59,22 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
     val brqRedirect = Flipped(ValidIO(new Redirect))
     val enq = new LsqEnqIO
     val ldu = new Bundle() {
+<<<<<<< Updated upstream
         val stld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
         val ldld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
         val ldin = Vec(LoadPipelineWidth, Flipped(Decoupled(new LqWriteBundle))) // from load_s3
+=======
+<<<<<<< HEAD
+        val storeLoadViolationQuery = Vec(LoadPipelineWidth, Flipped(new LoadViolationQueryIO)) // from load_s2
+        val loadLoadViolationQuery = Vec(LoadPipelineWidth, Flipped(new LoadViolationQueryIO)) // from load_s2
+        // TODO: 这里loadIn用StorePipelineWidth是不是写错了?
+        val loadIn = Vec(StorePipelineWidth, Flipped(Decoupled(new LqWriteBundle))) // from load_s3
+=======
+        val stld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
+        val ldld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
+        val ldin = Vec(LoadPipelineWidth, Flipped(Decoupled(new LqWriteBundle))) // from load_s3
+>>>>>>> ffc9de54938a9574f465b83a71d5252cfd37cf30
+>>>>>>> Stashed changes
     }
     val sta = new Bundle() {
       val storeMaskIn = Vec(StorePipelineWidth, Flipped(Valid(new StoreMaskBundle))) // from store_s0, store mask, send to sq from rs
@@ -107,6 +120,10 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   storeQueue.io.hartId := io.hartId
   // 目前该属性通过csr控制,默认关闭, 用来控制对于uncache的访问是否允许乱序执行
   storeQueue.io.uncacheOutstanding := io.uncacheOutstanding
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 
   dontTouch(loadQueue.io.tlbReplayDelayCycleCtrl)
   // 用来控制对于发生tlbmiss的情况, 延迟多少latency后发起uop的replay
