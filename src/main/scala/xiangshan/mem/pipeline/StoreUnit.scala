@@ -263,36 +263,49 @@ class StoreUnit(implicit p: Parameters) extends XSModule {
   val store_s2 = Module(new StoreUnit_S2)
   val store_wb = Module(new StoreUnit_WriteBack)
 
+  // 把rs来的uop送到store s0
   store_s0.io.in <> io.stin
+  // 把s0的查询tlb请求送出去
   store_s0.io.dtlbReq <> io.tlb.req
   io.tlb.req_kill := false.B
   store_s0.io.rsIdx := io.rsIdx
   store_s0.io.isFirstIssue := io.isFirstIssue
 
+  // 当拍送出storeMaskOut
   io.storeMaskOut.valid := store_s0.io.in.valid
   io.storeMaskOut.bits.mask := store_s0.io.out.bits.mask
   io.storeMaskOut.bits.sqIdx := store_s0.io.out.bits.uop.sqIdx
 
   PipelineConnect(store_s0.io.out, store_s1.io.in, true.B, store_s0.io.out.bits.uop.robIdx.needFlush(io.redirect))
+  // issue信号无用
   io.issue.valid := store_s1.io.in.valid && !store_s1.io.dtlbResp.bits.miss
   io.issue.bits := RegEnable(store_s0.io.in.bits, store_s0.io.in.valid)
 
+  // s0发出的tlb.req, s1收到resp
   store_s1.io.dtlbResp <> io.tlb.resp
+  // 输出第一组信号给lsq
   io.lsq <> store_s1.io.lsq
+  // store计算出地址后, 发给ldu, 进行st-ld的in-pipe查询, 用来确认是否需要重新执行ld
   io.reExecuteQuery := store_s1.io.reExecuteQuery
 
   PipelineConnect(store_s1.io.out, store_s2.io.in, true.B, store_s1.io.out.bits.uop.robIdx.needFlush(io.redirect))
 
   // feedback tlb miss to RS in store_s2
+  // s1的feedback打一拍, s2送给rs
   io.feedbackSlow.bits := RegNext(store_s1.io.rsFeedback.bits)
   io.feedbackSlow.valid := RegNext(store_s1.io.rsFeedback.valid && !store_s1.io.out.bits.uop.robIdx.needFlush(io.redirect))
 
+  // pmp
+  // pmp查询结果在S2返回(S0送出查询tlb的请求)
   store_s2.io.pmpResp <> io.pmp
   store_s2.io.static_pm := RegNext(io.tlb.resp.bits.static_pm)
+  // 如果是mmio store或者执行有异常, 则再次返回信息给lsq
   io.lsq_replenish := store_s2.io.out.bits // mmio and exception
   PipelineConnect(store_s2.io.out, store_wb.io.in, true.B, store_s2.io.out.bits.uop.robIdx.needFlush(io.redirect))
 
+  // redirect送给store S3
   store_wb.io.redirect <> io.redirect
+  // store S3写回
   store_wb.io.stout <> io.stout
 
   io.debug_ls := DontCare

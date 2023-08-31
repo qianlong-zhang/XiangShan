@@ -209,6 +209,9 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    * LoadQueueRAR
    */  
   loadQueueRAR.io.redirect <> io.redirect
+  // 这里的release与query请求中带的release区别是，
+  // 从query中带的release：如果发生异常或者需要replay, 则需要告诉lsq，release相关uop
+  // 这里的release是dcache中的cacheline被替换掉时发过来的
   loadQueueRAR.io.release <> io.release
   // 把loadQueue中的deqPtr给loadQueueRAR， 后者用来判断是否释放资源
   loadQueueRAR.io.ldWbPtr <> virtualLoadQueue.io.ldWbPtr
@@ -224,7 +227,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    * LoadQueueRAW
    */  
   loadQueueRAW.io.redirect <> io.redirect 
-  loadQueueRAW.io.storeIn <> io.sta.storeAddrIn
+  loadQueueRAW.io.storeIn <> io.sta.storeAddrIn // from sta S1
   // 对于地址已经ready的store指令, 把其指针给到loadQueueRAW, 用来释放比其年轻的load
   loadQueueRAW.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr
   // loadQueue用来与stAddrReadySqPtr比较, 如果相等, 则说明loadQueueRAW不需要继续寻找是否有load需要释放
@@ -293,7 +296,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   }
 
   // 对于发生rollback的情况，从中选择一个最老的
-  // rollback可能因为st-load violation导致,也可能由于uncache访问导致
+  // rollback可能因为st-load violation导致,也可能由于uncache乱序访问导致
   // 把从loadQueue中拿到的是否发生memoryViolation信号送出去(ctrlBlock)处理，
   // ctrlBlock会基于该信号从redirectGen模块中产生flush信号
   val (rollbackSelV, rollbackSelBits) = selectOldest(
@@ -310,8 +313,8 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    */  
   loadQueueReplay.io.redirect <> io.redirect
   loadQueueReplay.io.enq <> io.ldu.loadIn // from load_s3
-  loadQueueReplay.io.storeAddrIn <> io.sta.storeAddrIn // from store_s1
-  loadQueueReplay.io.storeDataIn <> io.std.storeDataIn // from store_s0
+  loadQueueReplay.io.storeAddrIn <> io.sta.storeAddrIn // from store Address s1
+  loadQueueReplay.io.storeDataIn <> io.std.storeDataIn // from store Data s0
   loadQueueReplay.io.replay <> io.replay
   loadQueueReplay.io.refill <> io.refill 
   loadQueueReplay.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr

@@ -433,6 +433,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     loadUnits(i).io.pmp <> pmp_check(i).resp
     // st-ld violation query 
     for (s <- 0 until StorePipelineWidth) {
+      //store S1输出给ldu, 看看有些load是否需要重新执行
       loadUnits(i).io.reExecuteQuery(s) := storeUnits(s).io.reExecuteQuery
     }
     loadUnits(i).io.lqReplayFull <> lsq.io.lqReplayFull
@@ -513,34 +514,46 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     dtlb_reqs(PrefetcherDTLBPortIndex).resp.ready := true.B
   }
 
-  // StoreUnit
+  // 连接StoreUnit
   for (i <- 0 until exuParameters.StuCnt) {
     val stu = storeUnits(i)
 
+    // 连接store data 流水线
     stdExeUnits(i).io.redirect <> redirect
     stdExeUnits(i).io.fromInt <> io.issue(i + exuParameters.LduCnt + exuParameters.StuCnt)
     stdExeUnits(i).io.fromFp := DontCare
     stdExeUnits(i).io.out := DontCare
 
     stu.io.redirect     <> redirect
+    // 从stu输出到rsfeedback, 由于rsfeedback是和ldu一起计算, 因此前面加上LduCnt后表示是stu的开始
     stu.io.feedbackSlow <> io.rsfeedback(exuParameters.LduCnt + i).feedbackSlow
+    // 从rs输出的rsIdx
     stu.io.rsIdx        <> io.rsfeedback(exuParameters.LduCnt + i).rsIdx
     // NOTE: just for dtlb's perf cnt
+    // 从rs输出的isFirstIssue
     stu.io.isFirstIssue <> io.rsfeedback(exuParameters.LduCnt + i).isFirstIssue
+    // 从rs输入的uop
     stu.io.stin         <> io.issue(exuParameters.LduCnt + i)
+    // 从stu的s1 stage输出到lsq
     stu.io.lsq          <> lsq.io.sta.storeAddrIn(i)
+    // 从stu的s2 stage输出到lsq
     stu.io.lsq_replenish <> lsq.io.sta.storeAddrInRe(i)
     // dtlb
+    // stu的tlb请求和response
     stu.io.tlb          <> dtlb_reqs.drop(exuParameters.LduCnt)(i)
+    // 从pmp返回的check结果给stu
     stu.io.pmp          <> pmp_check(i+exuParameters.LduCnt).resp
 
     // store unit does not need fast feedback
+    // storeunit没有快速唤醒通路
     io.rsfeedback(exuParameters.LduCnt + i).feedbackFast := DontCare
 
     // Lsq to sta unit
+    // stu在S0输出给lsq的store mask
     lsq.io.sta.storeMaskIn(i) <> stu.io.storeMaskOut
 
     // Lsq to std unit's rs
+    // store data输出给lsq
     lsq.io.std.storeDataIn(i) := stData(i)
 
 

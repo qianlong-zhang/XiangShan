@@ -232,11 +232,19 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     * Update addr/dataReadyPtr when issue from rs
     */
   // update issuePtr
+  // TODO: 为什么看4条?
   val IssuePtrMoveStride = 4
   require(IssuePtrMoveStride >= 2)
 
+  // 从上一次ready的指针处, 往前看4条指令, 看其是否ready
   val addrReadyLookupVec = (0 until IssuePtrMoveStride).map(addrReadyPtrExt + _.U)
+  // 如果这四条指令中, store指令有效且(是mmio 或者 地址已经计算出来且有效)且指针没有跨过enqPtr, 则表明其已经ready
   val addrReadyLookup = addrReadyLookupVec.map(ptr => allocated(ptr.value) && (mmio(ptr.value) || addrvalid(ptr.value)) && ptr =/= enqPtrExt(0))
+  // 对于ready的store指令, 计算新的ready指针
+  // 如果addrReadyLookup全false，则PriorityEncode(false.B, false.B, false.B, false, true.B)
+  //    输出4, 表示4条全ready(注意!_的取反操作)
+  // 如果addrReadyLookup= (false，false, true, false),
+  //    则结果(false，false, true, false, true)是2, 表示只有2个ready
   val nextAddrReadyPtr = addrReadyPtrExt + PriorityEncoder(VecInit(addrReadyLookup.map(!_) :+ true.B))
   addrReadyPtrExt := nextAddrReadyPtr
 
@@ -251,7 +259,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       deqPtrExtNext(0) // for mmio insts, deqPtr may be ahead of cmtPtr
     )
   }
-  
+  // 表示ready store指令的最老的那一条
   io.stAddrReadySqPtr := addrReadyPtrExt
 
   // update

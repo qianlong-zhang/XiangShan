@@ -92,13 +92,20 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   ))
   freeList.io := DontCare
 
-  //  LoadQueueRAW enqueue
+  // LoadQueueRAW enqueue
+  // canEnqueue实际是queryReqValid
   val canEnqueue = io.query.map(_.req.valid)
-  val cancelEnqueue = io.query.map(_.req.bits.uop.robIdx.needFlush(io.redirect)) 
+  val cancelEnqueue = io.query.map(_.req.bits.uop.robIdx.needFlush(io.redirect))
+  // 如果enqPtr(stIssuePtr) == ready store指令的最老的那一条
   val allAddrCheck = io.stIssuePtr === io.stAddrReadySqPtr
+  // 对于query的load指令, 用其自带的sqIdx与stAddrReadySqPtr进行比对
+  // 如果发现load中的sqIdx都比stAddrReadySqPtr年轻, 则不需要进行enqueue操作
+  // 因为此时说明前面ready的store(地址都已经计算出来, 准备提交)比当前的load要老
+  // 不会出现先读后写的请, 也就不需要enqueue到RAW中进行再次判断
   val hasAddrInvalidStore = io.query.map(_.req.bits.uop.sqIdx).map(sqIdx => {
     Mux(!allAddrCheck, isBefore(io.stAddrReadySqPtr, sqIdx), false.B) 
   })
+  // 如果发现有的store指令的地址还没有ready, 则需要把query中的load enqueue到LoadQueueRAW中
   val needEnqueue = canEnqueue.zip(hasAddrInvalidStore).zip(cancelEnqueue).map { case ((v, r), c) => v && r && !c }
   val bypassPAddr = Reg(Vec(LoadPipelineWidth, UInt(PAddrBits.W)))
   val bypassMask = Reg(Vec(LoadPipelineWidth, UInt(8.W)))

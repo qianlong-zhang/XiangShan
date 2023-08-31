@@ -73,13 +73,19 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   val lastLastCycleRedirect = RegNext(lastCycleRedirect)
 
   val validCount = distanceBetween(enqPtrExt(0), deqPtr)
+  // validCount + LoadPipelineWidth <= VirtualLoadQueueSize
   val allowEnqueue = validCount <= (VirtualLoadQueueSize - LoadPipelineWidth).U
+  // 这里实际不是canEnqueu, 实际是validReqVector
   val canEnqueue = io.enq.req.map(_.valid)
+  // 如果发生redirect, 则需要把allocated有效的entry无效掉
   val needCancel = WireInit(VecInit((0 until VirtualLoadQueueSize).map(i => {
     uop(i).robIdx.needFlush(io.redirect) && allocated(i) 
   })))
+
   val lastNeedCancel = RegNext(needCancel)
+  // 对于enqueue的请求, 也需要判断是否发生redirect需要cancel
   val enqCancel = io.enq.req.map(_.bits.robIdx.needFlush(io.redirect))
+  // 这里应该是lastEnqCancelCount
   val lastEnqCancel = PopCount(RegNext(VecInit(canEnqueue.zip(enqCancel).map(x => x._1 && x._2))))
   val lastCycleCancelCount = PopCount(lastNeedCancel)
 
@@ -89,14 +95,20 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   val enqPtrExtNext = Wire(Vec(io.enq.req.length, new LqPtr))
   when (lastCycleRedirect.valid) {
     // we recover the pointers in the next cycle after redirect
+    // 在发生了redirect后的一拍, 计算新的enqueue指针
+    // 用当前指针减去需要cancel的count
+    // TODO: 为什么不在发生redirect当拍计算enqPtr? 非要在redirect后一拍计算
     enqPtrExtNextVec := VecInit(enqPtrExt.map(_ - (lastCycleCancelCount + lastEnqCancel)))
   }.otherwise {
+    // 如果没有发生redirect, 则直接把当前指针加上enqCount即可
     enqPtrExtNextVec := VecInit(enqPtrExt.map(_ + enqCount))
   } 
 
+  // 如果VirtualLoadQueue没空, 则直接赋值
   when (isAfter(enqPtrExtNextVec(0), deqPtrNext)) {
     enqPtrExtNext := enqPtrExtNextVec
   } .otherwise {
+    // 如果空了, 则把enqPtr指向deqPtr位置
     enqPtrExtNext := VecInit((0 until io.enq.req.length).map(i => deqPtrNext + i.U))
   }
   enqPtrExt := enqPtrExtNext
@@ -105,11 +117,17 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   val DeqPtrMoveStride = CommitWidth
   require(DeqPtrMoveStride == CommitWidth, "DeqPtrMoveStride must be equal to CommitWidth!")
   val deqLookupVec = VecInit((0 until DeqPtrMoveStride).map(deqPtr + _.U))
+  // 如果deqPtr和enqPtr之间只有3个entry，ptr ！= enqPtrExt确保不会出现deqPtr超过enqPtr的情况
   val deqLookup = VecInit(deqLookupVec.map(ptr => allocated(ptr.value) && datavalid(ptr.value) && addrvalid(ptr.value) && ptr =/= enqPtrExt(0)))
+  // 还要剔除发生redirect的entry
   val deqInSameRedirectCycle = VecInit(deqLookupVec.map(ptr => needCancel(ptr.value)))
   // make chisel happy
-  val deqCountMask = Wire(UInt(DeqPtrMoveStride.W)) 
+  val deqCountMask = Wire(UInt(DeqPtrMoveStride.W))
+  // deqContMask中就是真正能deq的entry对应的mask
   deqCountMask := deqLookup.asUInt & ~deqInSameRedirectCycle.asUInt
+  // 如果deqContMask = 6'0b001111
+  //取反后6'0b110000, PriorityEncoderOH(0b110000) = 5, 再减一就是4
+  // 计算出一拍内提交的指令条数
   val commitCount = PopCount(PriorityEncoderOH(~deqCountMask) - 1.U)
   val lastCommitCount = RegNext(commitCount)
 
@@ -180,7 +198,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
     * Most load instructions writeback to regfile at the same time.
     * However,
     *   (1) For ready load instruction (no need replay), it writes back to ROB immediately.
-    */  
+    */
   for(i <- 0 until LoadPipelineWidth) {
     //   most lq status need to be updated immediately after load writeback to lq
     //   flag bits in lq needs to be updated accurately     

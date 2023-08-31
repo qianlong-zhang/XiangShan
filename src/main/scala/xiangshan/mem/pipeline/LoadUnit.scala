@@ -914,6 +914,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   io.out.bits.replayInfo.addrInvalidSqIdx := io.addrInvalidSqIdx // io.in.bits.uop.sqIdx - io.oracleMDPQuery.resp.distance // io.addrInvalidSqIdx
   io.out.bits.replayInfo.replayCarry := io.dcacheResp.bits.replayCarry
   io.out.bits.replayInfo.missMSHRId := io.dcacheResp.bits.mshr_id
+  // paddr(log2up(32)) = paddr(5)
   io.out.bits.replayInfo.dataInLastBeat := io.in.bits.paddr(log2Up(refillBytes))
   io.out.bits.replayInfo.debug := io.in.bits.uop.debugInfo
 
@@ -1417,7 +1418,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   val s3_loadWbMeta = Mux(hitLoadOut.valid, hitLoadOut.bits, io.lsq.loadOut.bits)
 
   // data from load queue refill
-  // TODO: loadOut和ldRawDataOut的区别?
+  // loadOut和ldRawDataOut的区别? 前者是按照地址完成选择的, 后者是64b数据
   // uncacheBuffer.io.loadOut <> io.loadOut
   // uncacheBuffer.io.loadRawDataOut <> io.ldRawDataOut
   val s3_loadDataFromLQ = io.lsq.ldRawData
@@ -1458,7 +1459,6 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   io.loadOut.valid := hitLoadOut.valid && !hitLoadOut.bits.uop.robIdx.needFlush(io.redirect) ||
                     io.lsq.loadOut.valid && !io.lsq.loadOut.bits.uop.robIdx.needFlush(io.redirect) && !hitLoadOut.valid
   // 这里的ready信号, 只有在dcache不输出正常数据的情况下才行
-  // 也就是dcache的数据优先级高
   io.lsq.loadOut.ready := !hitLoadOut.valid
 
   // fast load to load forward

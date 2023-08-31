@@ -128,12 +128,16 @@ class UncacheBufferEntry(entryIndex: Int)(implicit p: Parameters) extends XSModu
       }
     }
     is (s_wait) {
+      // 这个commit信号如何区分entry的id?
+      // 其实不用区分, 因为等待commit的uncache uop只有这一个
       when (RegNext(io.rob.commit)) {
         uncacheState := s_idle // ready for next mmio
       }
     }
   }  
 
+  // 只要不是idle，说明该entry的robIdx与ROB头上的robIdx匹配
+  // 同一时刻有且只可能有一个entry与之匹配， 因此把该entry的状态改为selected
   io.select := uncacheState =/= s_idle
 
   io.uncache.req.valid := uncacheState === s_req
@@ -144,7 +148,7 @@ class UncacheBufferEntry(entryIndex: Int)(implicit p: Parameters) extends XSModu
   io.uncache.req.bits.mask := req.mask
   io.uncache.req.bits.id := io.id
   io.uncache.req.bits.instrtype := DontCare
-  io.uncache.req.bits.replayCarry := DontCare  
+  io.uncache.req.bits.replayCarry := DontCare
   io.uncache.req.bits.atomic := true.B 
 
   io.uncache.resp.ready := true.B
@@ -329,7 +333,6 @@ class UncacheBuffer(implicit p: Parameters) extends XSModule with HasCircularQue
     enqIndexVec(w) := freeList.io.allocateSlot(w)
   }
 
-  // 
   val uncacheReq = Wire(Valid(io.uncache.req.bits.cloneType))
   val loadOut = Wire(Valid(io.loadOut(0).bits.cloneType))
   val loadRawDataOut = Wire(io.loadRawDataOut(0).cloneType)
@@ -360,10 +363,12 @@ class UncacheBuffer(implicit p: Parameters) extends XSModule with HasCircularQue
       }
 
       // uncache logic
+      // commit后, 用于把entry的状态机从wait改为idle
       e.io.rob <> io.rob
       e.io.uncache.req.ready <> io.uncache.req.ready
       e.io.loadOut.ready <> io.loadOut(0).ready
 
+      //如果当前entry就是被选中的， 则uncacheBuffer的数据从其中输出
       when (e.io.select) {
         uncacheReq.valid := e.io.uncache.req.valid
         uncacheReq.bits := e.io.uncache.req.bits
@@ -378,11 +383,14 @@ class UncacheBuffer(implicit p: Parameters) extends XSModule with HasCircularQue
         lqLoadAddrTriggerHitVec := e.io.trigger.lqLoadAddrTriggerHitVec
       }
 
+      //TODO: 这里的i不应该和上面的select是同一个entry吗?
+      // 如果是, 为啥不把这个when和上面写到一起?
       when (i.U === io.uncache.resp.bits.id) {
         e.io.uncache.resp <> io.uncache.resp
       }
   }
 
+  // 所有信号从entry中送出后打一拍再送出
   io.uncache.req.valid := RegNext(uncacheReq.valid)
   io.uncache.req.bits := RegNext(uncacheReq.bits)
   io.loadOut(0).valid := RegNext(loadOut.valid) && !RegNext(commitFire)

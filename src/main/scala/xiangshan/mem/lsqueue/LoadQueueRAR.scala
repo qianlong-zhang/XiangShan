@@ -79,16 +79,27 @@ class LoadQueueRAR(implicit p: Parameters) extends XSModule
   // Real-allocation: load_s2
   // PAddr write needs 2 cycles, release signal should delay 1 cycle so that
   // load enqueue can catch release.
+  // io.release写入期间, 可能新的req也会来, 此时为了处理release和req是相同paddr的情况
+  // 需要在paddr写入期间持续判断发生violation的可能.
   val release1Cycle = io.release
   val release2Cycle = RegNext(io.release)
+  // 没用使用
   val release2Cycle_dup_lsu = RegNext(io.release)
 
   // LoadQueueRAR enqueue condition:
   // There are still not completed load instructions before the current load instruction.
   // (e.g. "not completed" means that load instruction get the data or exception).
+  // query的请求中, 带着uop, 如果满足条件直接enqueue
+  // 条件是: 前面比当前query.req中uop更年轻的load指令拿到了数据并写回了
   val canEnqueue = io.query.map(_.req.valid)
   val cancelEnqueue = io.query.map(_.req.bits.uop.robIdx.needFlush(io.redirect))
+  // ldWbPtr即VirtualLoadQueue中deqPtr, 指向最老的一条要提交的load指令
+  // 如果query.lqIdx比deqPtr更年轻，就enqueue进入LoadQueueRAR，表示还有一些uop未写回
+  // 有未写回的uop则就有可能发生load-load violation
   val hasNotWritebackedLoad = io.query.map(_.req.bits.uop.lqIdx).map(lqIdx => isAfter(lqIdx, io.ldWbPtr))
+  // 1. 请求有效
+  // 2. 有未写回的uop
+  // 3. 没发生cancel
   val needEnqueue = canEnqueue.zip(hasNotWritebackedLoad).zip(cancelEnqueue).map { case ((v, r), c) => v && r && !c }
 
   // Allocate logic 
@@ -179,7 +190,7 @@ class LoadQueueRAR(implicit p: Parameters) extends XSModule
 
     query.resp.valid := RegNext(query.req.valid)
     // Generate real violation mask
-    // loadQueueRAR中的uop如果比req进来的uop的robIdx更年轻，则拉高，
+    // loadQueueRAR中的uop如果比req进来的uop的robIdx更老，则拉高，
     // 如果有这样更年轻的指令，则表明可能需要flush
     val robIdxMask = VecInit(uop.map(_.robIdx).map(isAfter(_, query.req.bits.uop.robIdx)))
     val matchMask = allocatedUInt &

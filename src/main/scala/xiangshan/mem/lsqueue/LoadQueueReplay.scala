@@ -208,6 +208,10 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   /**
    * used for re-select control
    */
+  // 对于每个LoadQueueReplay中的uop, 有一个7bit的credit与其对应,
+  // 对于发生的不同replay, 有一个不同的初始值, 每个cycle会自减, 如果credit变0, 则可以尝试重发
+  // 只有满足creditUpdate == 0, 才可以重发
+  // credit压根不起作用
   val credit = RegInit(VecInit(List.fill(LoadQueueReplaySize)(0.U(ReSelectLen.W))))
   val selBlocked = RegInit(VecInit(List.fill(LoadQueueReplaySize)(false.B)))  
   //  Ptrs to control which cycle to choose
@@ -236,8 +240,13 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val creditUpdate = WireInit(VecInit(List.fill(LoadQueueReplaySize)(0.U(ReSelectLen.W))))
   (0 until LoadQueueReplaySize).map(i => {
     creditUpdate(i) := Mux(credit(i) > 0.U(ReSelectLen.W), credit(i)-1.U(ReSelectLen.W), credit(i))
+    // 只有同时满足creditUpdate == 0, 且credit也等于0, 才可以重发
+    // credit不起作用, 始终是0
     selBlocked(i) := creditUpdate(i) =/= 0.U(ReSelectLen.W) || credit(i) =/= 0.U(ReSelectLen.W)
   })
+
+  // TODO: 这里缺一句: credit := creditUpdate
+
   val replayCarryReg = RegInit(VecInit(List.fill(LoadQueueReplaySize)(ReplayCarry(0.U, false.B))))
   val dataInLastBeatReg = RegInit(VecInit(List.fill(LoadQueueReplaySize)(false.B)))
 
@@ -248,10 +257,12 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val cancelEnq = io.enq.map(enq => enq.bits.uop.robIdx.needFlush(io.redirect))
   val needReplay = io.enq.map(enq => enq.bits.replayInfo.needReplay())
   val hasExceptions = io.enq.map(enq => ExceptionNO.selectByFu(enq.bits.uop.cf.exceptionVec, lduCfg).asUInt.orR && !enq.bits.tlbMiss)
+  // 无用信号
   val loadReplay = io.enq.map(enq => enq.bits.isLoadReplay)
   val needEnqueue = VecInit((0 until LoadPipelineWidth).map(w => {
     canEnqueue(w) && !cancelEnq(w) && needReplay(w) && !hasExceptions(w) 
   }))
+  // 无用信号
   val canFreeVec = VecInit((0 until LoadPipelineWidth).map(w => {
     canEnqueue(w) && loadReplay(w) && (!needReplay(w) || hasExceptions(w))
   }))
@@ -276,10 +287,15 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   for (i <- 0 until LoadQueueReplaySize) {
     // dequeue
     //  FIXME: store*Ptr is not accurate
-    dataNotBlockVec(i) := !isBefore(io.stDataReadySqPtr, blockSqIdx(i)) || stDataReadyVec(blockSqIdx(i).value) || io.sqEmpty // for better timing  
+    // 如果stDataReadySqPtr比blockSqIdx老或者相等 || 如果stDataReady || 如果storeQueue空
+    // 则说明store data 已经ready, 可以尝试重新发射那些等待store数据写回的load指令(forward fail)
+    dataNotBlockVec(i) := !isBefore(io.stDataReadySqPtr, blockSqIdx(i)) || stDataReadyVec(blockSqIdx(i).value) || io.sqEmpty // for better timing
+    // 如果stAddrReadySqPtr比blockSqIdx老或者相等 || 如果stAddrReady || 如果storeQueue空
+    // 则说明store地址已经ready, 可以尝试重新发射那些等待store地址写回的load指令
     addrNotBlockVec(i) := !isBefore(io.stAddrReadySqPtr, blockSqIdx(i)) || stAddrReadyVec(blockSqIdx(i).value) || io.sqEmpty // for better timing 
 
     // store address execute
+    // 除了storeQueue返回的stAddrReadyVec, 同cycle把storeAddrIn也送进来判断是否地址ready
     storeAddrInSameCycleVec(i) := VecInit((0 until StorePipelineWidth).map(w => {
       io.storeAddrIn(w).valid && 
       !io.storeAddrIn(w).bits.miss && 
@@ -287,6 +303,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     })).asUInt.orR // for better timing
 
     // store data execute
+    // 除了storeQueue返回的stDataReadyVec, 同cycle把storeDataIn也送进来判断是否地址ready
     storeDataInSameCycleVec(i) := VecInit((0 until StorePipelineWidth).map(w => {
       io.storeDataIn(w).valid && 
       blockSqIdx(i) === io.storeDataIn(w).bits.uop.sqIdx
@@ -297,27 +314,38 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   // store addr issue check
   val stAddrDeqVec = Wire(Vec(LoadQueueReplaySize, Bool()))
   (0 until LoadQueueReplaySize).map(i => {
+    // 如果store地址已经valid, 那些需要等待store地址写回的replay load(waitStore)就可以重新执行
+    // 产生stAddrDeqVec用于后续重发loadQueueReplay中的uop
     stAddrDeqVec(i) := allocated(i) && storeAddrValidVec(i)
   })
 
   // store data issue check
   val stDataDeqVec = Wire(Vec(LoadQueueReplaySize, Bool()))
   (0 until LoadQueueReplaySize).map(i => {
+    // 如果store数据已经valid, 那些需要等待store数据写回的replay load(forwardFail)就可以重新执行
+    // 产生stAddrDeqVec用于后续重发loadQueueReplay中的uop
     stDataDeqVec(i) := allocated(i) && storeDataValidVec(i)
   })
 
   // update block condition
+  // 更新block条件, 用于判断是否可以重发相应的uop
   (0 until LoadQueueReplaySize).map(i => {
     blockByForwardFail(i) := Mux(blockByForwardFail(i) && stDataDeqVec(i), false.B, blockByForwardFail(i))
     blockByWaitStore(i) := Mux(blockByWaitStore(i) && stAddrDeqVec(i), false.B, blockByWaitStore(i))
     blockByCacheMiss(i) := Mux(blockByCacheMiss(i) && io.refill.valid && io.refill.bits.id === missMSHRId(i), false.B, blockByCacheMiss(i))
 
+    // 更新creditUpdate值, 如果uop是因为dcache miss需要replay, 则判断是否已经refill, 如果已经refill则提前设置为0, 表示可以尽快发出
+    // Chisel 中重复赋值不会引起报错，但是最后一次赋值会覆盖之前的全部赋值，由此导致的电路逻辑错误不容易排查，因此要格外注意。
+    // 这里对creditUpdate的赋值, 不会与前面的creditUpdate每个cycle的更新产生冲突, 因为后后面会覆盖前面的.
     when (blockByCacheMiss(i) && io.refill.valid && io.refill.bits.id === missMSHRId(i)) { creditUpdate(i) := 0.U }
+
     when (blockByRARReject(i) && (!io.rarFull || !isAfter(uop(i).lqIdx, io.ldWbPtr))) { blockByRARReject(i) := false.B }
     when (blockByRAWReject(i) && (!io.rawFull || !isAfter(uop(i).sqIdx, io.stAddrReadySqPtr))) { blockByRAWReject(i) := false.B }
+    // tlbMiss和other的replay, 只能等到credit自减一直到0才会重发
+    //blockByTlbMiss(i) := Mux(blockByTlbMiss(i) && creditUpdate(i) === 0.U, false.B, blockByTlbMiss(i) )
     when (blockByTlbMiss(i) && creditUpdate(i) === 0.U) { blockByTlbMiss(i) := false.B }
     when (blockByOthers(i) && creditUpdate(i) === 0.U) { blockByOthers(i) := false.B }
-  })  
+  })
 
   //  Replay is splitted into 3 stages
   require((LoadQueueReplaySize % LoadPipelineWidth) == 0)
@@ -383,6 +411,8 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   })).asUInt // use uint instead vec to reduce verilog lines
   val s0_loadNormalReplaySelMask = s0_loadLowerPriorityReplaySelMask | s0_loadHigherPriorityReplaySelMask | s0_loadHintSelMask
   val s0_remNormalReplaySelVec = VecInit((0 until LoadPipelineWidth).map(rem => getRemBits(s0_loadNormalReplaySelMask)(rem)))
+  // 优先级：hint最高，higher更高
+  // TODO: 当前的选择逻辑有些问题: 如果有一个hint有效, 一个higiherPriority有效, 只能选择出hint那个, 无法两个同时选出
   val s0_loadPriorityReplaySelMask = Mux(s0_hintSelValid, s0_loadHintSelMask, Mux(s0_loadHigherPriorityReplaySelMask.orR, s0_loadHigherPriorityReplaySelMask, s0_loadLowerPriorityReplaySelMask))
   val s0_remPriorityReplaySelVec = VecInit((0 until LoadPipelineWidth).map(rem => getRemBits(s0_loadPriorityReplaySelMask)(rem)))
 
@@ -467,15 +497,19 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val ColdDownCycles = 16
   val coldCounter = RegInit(VecInit(List.fill(LoadPipelineWidth)(0.U(log2Up(ColdDownCycles).W))))
   val ColdDownThreshold = Wire(UInt(log2Up(ColdDownCycles).W))
+  // ColdDownThreshold初始值12, C
   ColdDownThreshold := Constantin.createRecord("ColdDownThreshold_"+p(XSCoreParamsKey).HartId.toString(), initValue = 12.U)
   assert(ColdDownCycles.U > ColdDownThreshold, "ColdDownCycles must great than ColdDownThreshold!")
 
+  // 只有在counter < 12时, 才可以发, 否则不发
   def replayCanFire(i: Int) = coldCounter(i) >= 0.U && coldCounter(i) < ColdDownThreshold
   def coldDownNow(i: Int) = coldCounter(i) >= ColdDownThreshold
 
   val s1_balanceOldestSelExt = (0 until LoadPipelineWidth).map(i => {
     val wrapper = Wire(Valid(new BalanceEntry))
     wrapper.valid := s1_oldestSel(i).valid
+    // 只有banckConflict需要在两个pipe中做balance,其他不需要,
+    // 在balanceReOrder会根据balance是否为true做检查
     wrapper.bits.balance := cause(s1_oldestSel(i).bits)(LoadReplayCauses.bankConflict)
     wrapper.bits.index := s1_oldestSel(i).bits
     wrapper.bits.port := i.U
@@ -522,11 +556,15 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     io.replay(i).bits.uop := s2_replayUop
     io.replay(i).bits.vaddr := vaddrModule.io.rdata(i)
     io.replay(i).bits.isFirstIssue := false.B
+    // 这里给isLoadReplay赋初值
     io.replay(i).bits.isLoadReplay := true.B
+    // 这里是在replay时, 带着real_way_en, 下次查询dcache时, 就可以只操作目标way即可
     io.replay(i).bits.replayCarry := s2_replayCarry
     io.replay(i).bits.mshrid := s2_replayMSHRId
     io.replay(i).bits.replacementUpdated := s2_replacementUpdated
+    // 对于dcache miss, 可以通过forward通道返回数据
     io.replay(i).bits.forward_tlDchannel := s2_replayCauses(LoadReplayCauses.dcacheMiss)
+    // 把选出来需要replay的entry, 重新写入到loadQueueReplay中
     io.replay(i).bits.sleepIndex := s2_oldestSel(i).bits
 
     when (io.replay(i).fire) {
@@ -537,9 +575,12 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   // update cold counter
   val lastReplay = RegNext(VecInit(io.replay.map(_.fire)))
   for (i <- 0 until LoadPipelineWidth) {
+    // 每次发生replay就加2
     when (lastReplay(i) && io.replay(i).fire) {
       coldCounter(i) := coldCounter(i) + 1.U
+      // 如果counter >= 12, 则继续加
     } .elsewhen (coldDownNow(i)) {
+      // 超过12后继续增加 直到到16 wrap around
       coldCounter(i) := coldCounter(i) + 1.U
     } .otherwise {
       coldCounter(i) := 0.U
@@ -560,10 +601,13 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val enqValidVec = Wire(Vec(LoadPipelineWidth, Bool()))
   val enqIndexVec = Wire(Vec(LoadPipelineWidth, UInt()))
 
+  // 区分是不是新的enqueue请求, 如果不是新的, 则不需要从freeList中新分配entry
+  // 对于isLoadReplay已经是true的, 使用原来的sleepIndex即可
   val newEnqueue = (0 until LoadPipelineWidth).map(i => {
     needEnqueue(i) && !io.enq(i).bits.isLoadReplay
   })
 
+  // 真正的enqueue操作
   for ((enq, w) <- io.enq.zipWithIndex) {
     vaddrModule.io.wen(w) := false.B
     freeList.io.doAllocate(w) := false.B
@@ -572,6 +616,8 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
 
     //  Allocated ready
     enqValidVec(w) := freeList.io.canAllocate(w)
+    // 对于从replay queue中发出后再次replay的指令, 需要用sleepIndex寻找到其原来的位置
+    // 重新enqueue
     enqIndexVec(w) := Mux(enq.bits.isLoadReplay, enq.bits.sleepIndex, freeList.io.allocateSlot(w))
     selectIndexOH(w) := UIntToOH(enqIndexVec(w))
     enq.ready := Mux(enq.bits.isLoadReplay, true.B, enqValidVec(w))
@@ -607,7 +653,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       val blockCyclesTlbPtr = blockPtrTlb(enqIndex)
       val blockCyclesCachePtr = blockPtrCache(enqIndex)
       val blockCyclesOtherPtr = blockPtrOthers(enqIndex)
-      creditUpdate(enqIndex) := Mux(replayInfo.cause(LoadReplayCauses.tlbMiss), blockCyclesTlb(blockCyclesTlbPtr), 
+      creditUpdate(enqIndex) := Mux(replayInfo.cause(LoadReplayCauses.tlbMiss), blockCyclesTlb(blockCyclesTlbPtr),
                                 Mux(replayInfo.cause(LoadReplayCauses.dcacheMiss), blockCyclesCache(blockCyclesCachePtr) + dataInLastBeat, blockCyclesOthers(blockCyclesOtherPtr)))
 
       // init
@@ -634,6 +680,9 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       // special case: tlb miss
       when (replayInfo.cause(LoadReplayCauses.tlbMiss)) {
         blockByTlbMiss(enqIndex) := true.B
+        // 从四个latency中轮询, 如果到达3 则保持3, 否则逐个从0遍历
+        // 第一次replay时credit=14, 第二次时credit=0, 第三次时credit=125, 第四次时0, 再以后发生replay, 一直是0.
+        // val tlbReplayDelayCycleCtrl = WireInit(VecInit(Seq(14.U(ReSelectLen.W), 0.U(ReSelectLen.W), 125.U(ReSelectLen.W), 0.U(ReSelectLen.W))))
         blockPtrTlb(enqIndex) := Mux(blockPtrTlb(enqIndex) === 3.U(2.W), blockPtrTlb(enqIndex), blockPtrTlb(enqIndex) + 1.U(2.W))
       }
 
@@ -684,6 +733,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     //
     val sleepIndex = enq.bits.sleepIndex 
     when (enq.valid && enq.bits.isLoadReplay) {
+      // 对于原来是replay这次不需要replay的操作, 可以dequeue
       when (!needReplay(w) || hasExceptions(w)) {
         allocated(sleepIndex) := false.B 
         freeMaskVec(sleepIndex) := true.B
