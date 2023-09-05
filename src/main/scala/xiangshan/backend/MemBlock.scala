@@ -168,8 +168,10 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   // dcache给lsq返回数据, 打一拍
   val delayedDcacheRefill = RegNext(dcache.io.lsu.lsq)
 
+  //TODO: 为什么delay2? 分布式的csrCtrl是不是需要2个cycle才能拿到?
   val csrCtrl = DelayN(io.ooo_to_mem.csrCtrl, 2)
   dcache.io.csr.distribute_csr <> csrCtrl.distribute_csr
+  // TODO: 这里为什么延迟数有区别?
   dcache.io.l2_pf_store_only := RegNext(io.ooo_to_mem.csrCtrl.l2_pf_store_only, false.B)
   io.mem_to_ooo.csrUpdate := RegNext(dcache.io.csr.update)
   io.error <> RegNext(RegNext(dcache.io.error))
@@ -190,6 +192,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   val prefetcherOpt: Option[BasePrefecher] = coreParams.prefetcher.map {
     case _: SMSParams =>
       val sms = Module(new SMSPrefetcher())
+      // 把配置SMS的信息通过csr写入SMS中
       sms.io_agt_en := RegNextN(io.ooo_to_mem.csrCtrl.l1D_pf_enable_agt, 2, Some(false.B))
       sms.io_pht_en := RegNextN(io.ooo_to_mem.csrCtrl.l1D_pf_enable_pht, 2, Some(false.B))
       sms.io_act_threshold := RegNextN(io.ooo_to_mem.csrCtrl.l1D_pf_active_threshold, 2, Some(12.U))
@@ -198,7 +201,9 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
       sms
   }
   prefetcherOpt.foreach(pf => {
-    val pf_to_l2 = ValidIODelay(pf.io.l2_req, 2)
+    // pf_addr是从sms预取器中发出的预取地址
+    // 把预取地址送到MemBlock的pf_sender_opt中, 进而把该地址送到L2中
+    val pf_to_l2 = ValidIODelay(pf.io.pf_addr, 2)
     outer.pf_sender_opt.get.out.head._1.addr_valid := pf_to_l2.valid
     outer.pf_sender_opt.get.out.head._1.addr := pf_to_l2.bits.addr
     outer.pf_sender_opt.get.out.head._1.pf_source := pf_to_l2.bits.source
@@ -212,6 +217,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
       l1_pf_req.valid := false.B
       l1_pf_req.bits := DontCare
   }
+  //默认使能预取器在发生hit时继续训练
   val pf_train_on_hit = RegNextN(io.ooo_to_mem.csrCtrl.l1D_pf_train_on_hit, 2, Some(true.B))
 
   loadUnits.zipWithIndex.map(x => x._1.suggestName("LoadUnit_"+x._2))
@@ -222,15 +228,11 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   // will be writebacked using load writeback port
   //
   // However, atom exception will be writebacked to rob
-  val loadWritebackOverride  = Mux(atomicsUnit.io.out.valid, atomicsUnit.io.out.bits, loadUnits.head.io.loadOut.bits)
-  loadOut0.valid := atomicsUnit.io.out.valid || loadUnits.head.io.loadOut.valid
-  loadOut0.bits  := loadWritebackOverride
-  atomicsUnit.io.out.ready := loadOut0.ready
-  loadUnits.head.io.loadOut.ready := loadOut0.ready
-  // 如果写回的是atomicsUnit, 则atmoicsUnit的异常信号是从store写回, 而不是从loadUnits写回
-  // 所以这里把loadUnits的异常向量全部清空
-  // TODO: 为什么atomic的异常是从store写回？ 因为atomic指令(例如lr)失败与否与store指令(例如sr)的执行结果相关， 与load的执行结果无关。
-=======
+  // using store writeback port
+
+  // TODO: atomic写回端口占用了loadUnits.head的写回端口, 那么lodUnits.head的写回怎么办? 直接丢弃会不会出错?
+  // atomic指令会清空rob才dispatch，因此不会出现上述情况
+  // 为什么atomic的异常是从store写回？ 因为atomic指令(例如lr)失败与否与store指令(例如sr)的执行结果相关， 与load的执行结果无关。
   val loadWritebackOverride  = Mux(atomicsUnit.io.out.valid, atomicsUnit.io.out.bits, loadUnits.head.io.ldout.bits)
   val ldout0 = Wire(Decoupled(new ExuOutput))
   ldout0.valid := atomicsUnit.io.out.valid || loadUnits.head.io.ldout.valid
@@ -239,6 +241,9 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   loadUnits.head.io.ldout.ready := ldout0.ready
 >>>>>>> ffc9de54938a9574f465b83a71d5252cfd37cf30
   when(atomicsUnit.io.out.valid){
+    // 如果写回的是atomicsUnit, 则atmoicsUnit的异常信号是从store写回, 而不是从loadUnits写回
+    // 所以这里把loadUnits的异常向量全部清空
+    // TODO: 为什么atomic的异常是从store写回？ 因为atomic指令(例如lr)失败与否与store指令(例如sc)的执行结果相关， 与load的执行结果无关。
     ldout0.bits.uop.cf.exceptionVec := 0.U(16.W).asBools // exception will be writebacked via store wb port
   }
 
@@ -246,12 +251,19 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   io.mem_to_ooo.writeback <> ldExeWbReqs ++ VecInit(storeUnits.map(_.io.stout)) ++ VecInit(stdExeUnits.map(_.io.out))
   io.mem_to_ooo.otherFastWakeup := DontCare
   io.mem_to_ooo.otherFastWakeup.take(2).zip(loadUnits.map(_.io.fast_uop)).foreach{case(a,b)=> a := b}
+  // TODO: 这里是硬编码, 获取loadUnits, 应该改为take(exuParameters.LduCnt)
+  // 把从loadUnits中送出的fastUop信号通过MemBlock送到顶层的XSCore中
+  // XSCore会把这些信号再送回exuBlocks中唤醒相应指令继续执行
+  // io.otherFastWakeup.take(2).zip(loadUnits.map(_.io.fastUop)).foreach { case (a, b) => a := b }
+  // 丢掉load和std的写回, 只剩sta的写回, 用于后续trigger和mmio的判断
   val stOut = io.mem_to_ooo.writeback.drop(exuParameters.LduCnt).dropRight(exuParameters.StuCnt)
 
   // prefetch to l1 req
   // 把预取器中输出的预取请求发给loadUnits, 在stage0会按照优先级挑选发送到后续load流水
   // 预取器中输出的请求是l1_pf_req
   loadUnits.foreach(load_unit => {
+    // 把预取器中输出的预取请求发给loadUnits, 在stage0会按照优先级挑选发送到后续load流水
+    // 预取器中输出的请求是l1_pf_req
     load_unit.io.prefetch_req.valid <> l1_pf_req.valid
     load_unit.io.prefetch_req.bits <> l1_pf_req.bits
   })
@@ -287,6 +299,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   val sbuffer = Module(new Sbuffer)
   // if you wants to stress test dcache store, use FakeSbuffer
   // val sbuffer = Module(new FakeSbuffer) // out of date now
+  // store queue中issue指针, 输出给MemBlock, 最终送到执行单元
+  // 如果配置了checkWait则只有当其他指令在这个store后面时, 才允许发射
   io.mem_to_ooo.stIssuePtr := lsq.io.issuePtrExt
 
   // 把线程id送给各个模块
@@ -326,6 +340,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     tlb_prefetch.io // let the module have name in waveform
   })
   val dtlb = dtlb_ld ++ dtlb_st ++ dtlb_prefetch
+  // 展平所有dtlb的requestor, 生成一个新的Seq
+  // requestor中信号包含req/req_kill/response
   val ptwio = Wire(new VectorTlbPtwIO(exuParameters.LduCnt + exuParameters.StuCnt + 1)) // load + store + hw prefetch
   val dtlb_reqs = dtlb.map(_.requestor).flatten
   val dtlb_pmps = dtlb.map(_.pmp).flatten
@@ -354,6 +370,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   }
 
   val ptw_resp_next = RegEnable(ptwio.resp.bits, ptwio.resp.valid)
+  // 只有在sfence没执行或satp没有改变情况下ptw的response才有效
   val ptw_resp_v = RegNext(ptwio.resp.valid && !(sfence.valid && tlbcsr.satp.changed), init = false.B)
   ptwio.resp.ready := true.B
 
@@ -362,6 +379,9 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     .zipWithIndex
     // 这里的tlb代表每个dtlb中的ptw.req成员变量
     .foreach{ case (tlb, i) =>
+      // 是否需要真的发出ptw请求? 只有在dtlb中ptw.req有效, 且满足如下条件时才发出:
+      // ptw_resp_v为假或者vector_hit为假或者ptw_resp_next没有hit
+      // 也就是当拍没有ptw的response, 且当拍不会回填ptw时才会发出ptw请求
       tlb.ready := ptwio.req(i).ready
       ptwio.req(i).bits := tlb.bits
     val vector_hit = if (refillBothTlb) Cat(ptw_resp_next.vector).orR
@@ -408,6 +428,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
       Cat(ptwio.resp.bits.data.entry.ppn, ptwio.resp.bits.data.ppn_low(i), 0.U(12.W)).asUInt)
     dtlb.map(_.ptw_replenish(i) := pmp_check_ptw.io.resp)
   }
+  // 这部分是调试用的trigger, 具体trigger是否enbale由csr控制
+  // 如果使能trigger, 则把相应的trigger数据写入loadUnits或者storeUnits的相应地址
 
   for (i <- 0 until exuParameters.LduCnt) {
     io.debug_ls.debugLsInfo(i) := loadUnits(i).io.debug_ls
@@ -509,9 +531,11 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     // 从lsq/sbuffer中获取forward数据
     loadUnits(i).io.lsq.forward <> lsq.io.forward(i)
     loadUnits(i).io.sbuffer <> sbuffer.io.forward(i)
+    // 在发出Tilink的命令是TLMessages.GrantData时, dcache可以forward给loadUnits数据
     loadUnits(i).io.tl_d_channel := dcache.io.lsu.forward_D(i)
     loadUnits(i).io.forward_mshr <> dcache.io.lsu.forward_mshr(i)
     // ld-ld violation check
+    // load的S2会去check是否发生了violation, 把信号送到lsq去确认
     loadUnits(i).io.lsq.ldld_nuke_query <> lsq.io.ldu.ldld_nuke_query(i)
     loadUnits(i).io.lsq.stld_nuke_query <> lsq.io.ldu.stld_nuke_query(i)
     loadUnits(i).io.csrCtrl       <> csrCtrl
@@ -523,12 +547,15 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     // 把loadUnits中访问tlb的请求送到tlb去处理
     loadUnits(i).io.tlb <> dtlb_reqs.take(exuParameters.LduCnt)(i)
     // pmp
-    // 把loadUnits中访问pmp的请求送到pmp去处理
+    // 把loadUnits中访问pmp的请求送到pmp去检查，返回resp
     loadUnits(i).io.pmp <> pmp_check(i).resp
     // st-ld violation query
     for (s <- 0 until StorePipelineWidth) {
+      //store S1输出给ldu, 看看有些load是否需要重新执行
+      // store流水线中执行的指令, 送到loadUnits中进行检查, 是否发生violation
       loadUnits(i).io.stld_nuke_query(s) := storeUnits(s).io.stld_nuke_query
     }
+    // 如果lsq满了, 反馈信号给loadUnits, 用于触发fastReplay
     loadUnits(i).io.lq_rep_full <> lsq.io.lq_rep_full
     // prefetch
     prefetcherOpt.foreach(pf => {
@@ -541,6 +568,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
           )
       )
       pf.io.ld_in(i).bits := loadUnits(i).io.prefetch_train.bits
+      // 如果是pointerChasing则可以把pc直接送回, 否则要打一拍保证时序
       pf.io.ld_in(i).bits.uop.cf.pc := Mux(loadUnits(i).io.s2_ptr_chasing, io.ooo_to_mem.loadPc(i), RegNext(io.ooo_to_mem.loadPc(i)))
     })
 
@@ -551,6 +579,10 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     // i=0, LduCnt=2, fastPriority = Seq(0,1) ++ null = Seq(0, 1)
     // i=1, LduCnt=2, fastPriority = Seq(1) ++ Seq(0) = Seq(1, 0)
     val fastPriority = (i until exuParameters.LduCnt) ++ (0 until i)
+    // 结合上面, loadUnit0产生Seq(0, 1), fastValidVec就是(loadUnits(0).io.fastpathOut.valid, loadUnits(1).io.fastpathOut.valid)
+    // loadUnit(1)的fastValidVec就是(loadUnits(1).io.fastpathOut.valid, loadUnits(0).io.fastpathOut.valid)
+    // 假如: loadUnits(0).io.fastpathOut.valid = true.B;  loadUnits(1).io.fastpathOut.valid = false.B
+    // fastValidVec = Seq(true.B, false.B);
     val fastValidVec = fastPriority.map(j => loadUnits(j).io.l2l_fwd_out.valid)
     val fastDataVec = fastPriority.map(j => loadUnits(j).io.l2l_fwd_out.data)
     val fastErrorVec = fastPriority.map(j => loadUnits(j).io.l2l_fwd_out.dly_ld_err)
@@ -563,15 +595,21 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     loadUnits(i).io.ld_fast_imm := io.ooo_to_mem.loadFastImm(i)
     loadUnits(i).io.replay <> lsq.io.replay(i)
 
+    // TODO: 这个hint作用是什么? L2用来告诉loadUnits,是否要尽快发起replay
+    // 最终信号来源是CustomL1Hint.scala中的l1Hint, 如果L1说3个cycle后就能获取数据, 那么loadUnits就尽快发起fastReplay
     loadUnits(i).io.l2_hint <> io.l2_hint
 
     // 把loadUnits和lsq连起来
     // passdown to lsq (load s2)
+    // 从loadUnits写回数据到load Queue
     lsq.io.ldu.ldin(i) <> loadUnits(i).io.lsq.ldin
     lsq.io.ldout(i) <> loadUnits(i).io.lsq.uncache
+    // loadUnits从loadQueue中拿Raw数据
     lsq.io.ld_raw_data(i) <> loadUnits(i).io.lsq.ld_raw_data
+    // 把loadUnits和lsq的trigger连起来
     lsq.io.trigger(i) <> loadUnits(i).io.lsq.trigger
 
+    // 把l2Hint送给lsq
     lsq.io.l2_hint.valid := io.l2_hint.valid
     lsq.io.l2_hint.bits.sourceId := io.l2_hint.bits.sourceId
 
@@ -619,35 +657,49 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     dtlb_reqs(PrefetcherDTLBPortIndex).resp.ready := true.B
   }
 
+  // StoreUnit
   // StoreUnit, 分成sta(storeUnits(i))和std(stdExeUnits(i))分别处理
   for (i <- 0 until exuParameters.StuCnt) {
     val stu = storeUnits(i)
 
+    // 连接store data 流水线
     stdExeUnits(i).io.redirect <> redirect
+    // issue = LsExuCnt + StuCnt, 其中LsExuCnt = LduCnt + StuCnt
+    // 展开后issue = LduCnt + StuCnt + StuCnt, 这里的i就是用来取出store data的
     stdExeUnits(i).io.fromInt <> io.ooo_to_mem.issue(i + exuParameters.LduCnt + exuParameters.StuCnt)
     stdExeUnits(i).io.fromFp := DontCare
     stdExeUnits(i).io.out := DontCare
 
     stu.io.redirect      <> redirect
+    // 从stu输出到rsfeedback, 由于rsfeedback是和ldu一起计算, 因此前面加上LduCnt后表示是stu的开始
     stu.io.feedback_slow <> io.rsfeedback(exuParameters.LduCnt + i).feedbackSlow
+    // 从rs输出的rsIdx
     stu.io.rsIdx         <> io.rsfeedback(exuParameters.LduCnt + i).rsIdx
     // NOTE: just for dtlb's perf cnt
+    // 从rs输出的isFirstIssue
     stu.io.isFirstIssue <> io.rsfeedback(exuParameters.LduCnt + i).isFirstIssue
+    // 从rs输入的uop
     stu.io.stin         <> io.ooo_to_mem.issue(exuParameters.LduCnt + i)
+    // 从stu的s1 stage输出到lsq
     stu.io.lsq          <> lsq.io.sta.storeAddrIn(i)
+    // 从stu的s2 stage输出到lsq
     stu.io.lsq_replenish <> lsq.io.sta.storeAddrInRe(i)
     // dtlb
     // 把sta的tlb请求送到专属于store的dtlb_st中处理
     stu.io.tlb          <> dtlb_reqs.drop(exuParameters.LduCnt)(i)
+    // 从pmp返回的check结果给stu
     stu.io.pmp          <> pmp_check(i+exuParameters.LduCnt).resp
 
     // store unit does not need fast feedback
+    // storeunit没有快速唤醒通路
     io.rsfeedback(exuParameters.LduCnt + i).feedbackFast := DontCare
 
     // Lsq to sta unit
+    // stu在S0输出给lsq的store mask
     lsq.io.sta.storeMaskIn(i) <> stu.io.st_mask_out
 
     // Lsq to std unit's rs
+    // store data输出给lsq
     lsq.io.std.storeDataIn(i) := stData(i)
 
 
@@ -655,6 +707,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     // 2. when store issue, broadcast issued sqPtr to wake up the following insts
     // io.stIn(i).valid := io.issue(exuParameters.LduCnt + i).valid
     // io.stIn(i).bits := io.issue(exuParameters.LduCnt + i).bits
+    // stu中指令发射后, 通过stIn发送到LFST去更新表中内容
     io.mem_to_ooo.stIn(i).valid := stu.io.issue.valid
     io.mem_to_ooo.stIn(i).bits := stu.io.issue.bits
 
@@ -708,6 +761,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   }
 
   // Uncahce
+  // 目前uncache的写不支持outstanding
   uncache.io.enableOutstanding := io.ooo_to_mem.csrCtrl.uncache_write_outstanding_enable
   io.mem_to_ooo.lsqio.mmio       := lsq.io.rob.mmio
   lsq.io.rob.lcommit             := io.ooo_to_mem.lsqio.lcommit
@@ -720,6 +774,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
 //  lsq.io.rob            <> io.lsqio.rob
   lsq.io.enq            <> io.ooo_to_mem.enqLsq
   lsq.io.brqRedirect    <> redirect
+  // 把从loadQueue中拿到的是否发生memoryViolation信号送出去(ctrlBlock)处理
+  // ctrlBlock会基于该信号从redirectGen模块中产生flush信号
   io.mem_to_ooo.memoryViolation    <> lsq.io.rollback
   io.mem_to_ooo.lsqio.lqCanAccept  := lsq.io.lqCanAccept
   io.mem_to_ooo.lsqio.sqCanAccept  := lsq.io.sqCanAccept
@@ -731,6 +787,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   lsq.io.release        := dcache.io.lsu.release
   lsq.io.lqCancelCnt <> io.mem_to_ooo.lqCancelCnt
   lsq.io.sqCancelCnt <> io.mem_to_ooo.sqCancelCnt
+  // 把lsq中的Deq信号(提交个数)送到ctrlBlock
+  // ctrlBlock基于此决定dispatch个数等信息
   lsq.io.lqDeq <> io.mem_to_ooo.lqDeq
   lsq.io.sqDeq <> io.mem_to_ooo.sqDeq
   lsq.io.tl_d_channel <> dcache.io.lsu.tl_d_channel
@@ -746,6 +804,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   sbuffer.io.dcache     <> dcache.io.lsu.store
   sbuffer.io.force_write <> lsq.io.force_write
   // flush sbuffer
+  // atomicUnits执行时, 需要flush sbuffer
   val fenceFlush = io.ooo_to_mem.flushSb
   val atomicsFlush = atomicsUnit.io.flush_sbuffer.valid
   val stIsEmpty = sbuffer.io.flush.empty && uncache.io.flush.empty
@@ -841,6 +900,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     assert(!storeUnits(i).io.feedback_slow.valid)
   }
 
+  // 把异常地址送出给csr, 准备异常处理
   lsq.io.exceptionAddr.isStore := io.ooo_to_mem.isStore
   // Exception address is used several cycles after flush.
   // We delay it by 10 cycles to ensure its flush safety.
@@ -850,6 +910,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   }.elsewhen (atomicsUnit.io.exceptionAddr.valid) {
     atomicsException := true.B
   }
+  // TODO: 为什么atomic有异常需要处理时,不允许有新指令进入?
   val atomicsExceptionAddress = RegEnable(atomicsUnit.io.exceptionAddr.bits, atomicsUnit.io.exceptionAddr.valid)
   io.mem_to_ooo.lsqio.vaddr := RegNext(Mux(atomicsException, atomicsExceptionAddress, lsq.io.exceptionAddr.vaddr))
   XSError(atomicsException && atomicsUnit.io.in.valid, "new instruction before exception triggers\n")

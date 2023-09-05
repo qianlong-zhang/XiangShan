@@ -578,6 +578,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   s1_vaddr_hi         := s1_in.vaddr(VAddrBits - 1, 6)
   s1_vaddr_lo         := s1_in.vaddr(5, 0)
   s1_vaddr            := Cat(s1_vaddr_hi, s1_vaddr_lo)
+  // TODO: 这里paddr(0) paddr(1)什么区别?, 没区别, 时需考虑复制一份
   s1_paddr_dup_lsu    := io.tlb.resp.bits.paddr(0)
   s1_paddr_dup_dcache := io.tlb.resp.bits.paddr(1)
 
@@ -612,6 +613,9 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   io.lsq.forward.pc        := s1_in.uop.cf.pc // FIXME: remove it
 
   // st-ld violation query
+  // 对于s1和s2, 都要去检查是否因为发生了violation导致需要replay这些load指令
+  // 对于S0和S3为什么没有? S1才能拿到paddr进行检查，s0拿不到, 因此无法检查. S3已经写回, 无法通过s1_nuke进行replay
+  // 只能通过flush进行回滚
   val s1_nuke = VecInit((0 until StorePipelineWidth).map(w => {
                        io.stld_nuke_query(w).valid && // query valid
                        isAfter(s1_in.uop.robIdx, io.stld_nuke_query(w).bits.robIdx) && // older store
@@ -755,6 +759,8 @@ class LoadUnit(implicit p: Parameters) extends XSModule
       s2_exception_vec := 0.U.asTypeOf(s2_exception_vec.cloneType)
     }
   }
+  // 从发生的异常向量中选择，看是否有inloadAddrMisaligned, loadAccessFault, loadPageFault发生
+  // 重新给sc_exception
   val s2_exception = ExceptionNO.selectByFu(s2_exception_vec, lduCfg).asUInt.orR
 
   val (s2_fwd_frm_d_chan, s2_fwd_data_frm_d_chan) = io.tl_d_channel.forward(s1_valid && s1_out.forward_tlDchannel, s1_out.mshrid, s1_out.paddr)
@@ -811,6 +817,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
                           (s2_in.mask & io.stld_nuke_query(w).bits.mask).orR // data mask contain
                         })).asUInt.orR && !s2_tlb_miss || s2_in.rep_info.nuke
 
+  // 如果在dcache中分配了mshr,或者命中了已经分配的mshr, 则回复handled给LoadUnit
   val s2_cache_handled   = io.dcache.resp.bits.handled
   val s2_cache_tag_error = RegNext(io.csrCtrl.cache_error_enable) &&
                            io.dcache.resp.bits.tag_error

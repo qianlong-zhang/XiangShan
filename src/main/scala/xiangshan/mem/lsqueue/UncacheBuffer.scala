@@ -186,6 +186,7 @@ class UncacheBufferEntry(entryIndex: Int)(implicit p: Parameters) extends XSModu
 
   io.ldout.valid              := (uncacheState === s_wait) && !uncacheCommitFired
   io.ldout.bits               := DontCare
+  // commit后, 用于把entry的状态机从wait改为idle
   io.ldout.bits.uop           := selUop
   io.ldout.bits.uop.lqIdx     := req.uop.lqIdx
   io.ldout.bits.data          := rdataPartialLoad

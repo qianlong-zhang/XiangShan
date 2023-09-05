@@ -147,7 +147,11 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   // 这里的release是dcache中的cacheline被替换掉时发过来的
   // 把loadQueue中的deqPtr给loadQueueRAR， 后者用来判断是否释放资源
   loadQueueRAR.io.redirect <> io.redirect
+  // 这里的release与query请求中带的release区别是，
+  // 从query中带的release：如果发生异常或者需要replay, 则需要告诉lsq，release相关uop
+  // 这里的release是dcache中的cacheline被替换掉时发过来的
   loadQueueRAR.io.release  <> io.release
+  // 把loadQueue中的deqPtr给loadQueueRAR， 后者用来判断是否释放资源
   loadQueueRAR.io.ldWbPtr  <> virtualLoadQueue.io.ldWbPtr
   for (w <- 0 until LoadPipelineWidth) {
     loadQueueRAR.io.query(w).req    <> io.ldu.ldld_nuke_query(w).req // from load_s1
@@ -175,6 +179,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
    * VirtualLoadQueue
    */
   virtualLoadQueue.io.redirect    <> io.redirect
+  // dispatch2RS出来的io.enq 先打一拍, 进入LSQWrapper后又打了一拍
   virtualLoadQueue.io.enq         <> io.enq
   virtualLoadQueue.io.ldin        <> io.ldu.ldin // from load_s3
   virtualLoadQueue.io.lqFull      <> io.lqFull

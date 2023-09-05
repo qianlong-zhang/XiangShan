@@ -204,7 +204,7 @@ class LoadQueueRAR(implicit p: Parameters) extends XSModule
 
     query.resp.valid := RegNext(query.req.valid)
     // Generate real violation mask
-    // loadQueueRAR中的uop如果比req进来的uop的robIdx更老，则拉高，
+    // loadQueueRAR中的uop如果比req进来的uop的robIdx更年轻，则拉高，
     // 如果有这样更年轻的指令，则表明可能需要flush
     val robIdxMask = VecInit(uop.map(_.robIdx).map(isAfter(_, query.req.bits.uop.robIdx)))
     val matchMask = allocatedUInt &

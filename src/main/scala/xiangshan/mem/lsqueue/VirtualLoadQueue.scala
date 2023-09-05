@@ -78,6 +78,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   val lastCycleRedirect = RegNext(io.redirect)
   val lastLastCycleRedirect = RegNext(lastCycleRedirect)
 
+  // validCount + LoadPipelineWidth <= VirtualLoadQueueSize
   val validCount = distanceBetween(enqPtrExt(0), deqPtr)
   // validCount + LoadPipelineWidth <= VirtualLoadQueueSize
   val allowEnqueue = validCount <= (VirtualLoadQueueSize - LoadPipelineWidth).U
@@ -98,12 +99,16 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
 
   // update enqueue pointer
   val enqNumber = Mux(io.enq.canAccept && io.enq.sqCanAccept, PopCount(io.enq.req.map(_.valid)), 0.U)
+  // 在发生了redirect后的一拍, 计算新的enqueue指针
+  // 用当前指针减去需要cancel的count
+  // TODO: 为什么不在发生redirect当拍计算enqPtr? 非要在redirect后一拍计算
   val enqPtrExtNextVec = Wire(Vec(io.enq.req.length, new LqPtr))
   val enqPtrExtNext = Wire(Vec(io.enq.req.length, new LqPtr))
   when (lastLastCycleRedirect.valid) {
     // we recover the pointers in the next cycle after redirect
     enqPtrExtNextVec := VecInit(enqPtrExt.map(_ - redirectCancelCount))
   } .otherwise {
+    // 如果没有发生redirect, 则直接把当前指针加上enqCount即可
     enqPtrExtNextVec := VecInit(enqPtrExt.map(_ + enqNumber))
   }
   assert(!(lastCycleRedirect.valid && enqNumber =/= 0.U))
@@ -126,11 +131,12 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   // 还要剔除发生redirect的entry
   val deqInSameRedirectCycle = VecInit(deqLookupVec.map(ptr => needCancel(ptr.value)))
   // make chisel happy
+  // deqContMask中就是真正能deq的entry对应的mask
   val deqCountMask = Wire(UInt(DeqPtrMoveStride.W))
   // deqContMask中就是真正能deq的entry对应的mask
   deqCountMask := deqLookup.asUInt & ~deqInSameRedirectCycle.asUInt
   // 如果deqContMask = 6'0b001111
-  //取反后6'0b110000, PriorityEncoderOH(0b110000) = 5, 再减一就是4
+  // 取反后6'0b110000, PriorityEncoderOH(0b110000) = 5, 再减一就是4
   // 计算出一拍内提交的指令条数
   val commitCount = PopCount(PriorityEncoderOH(~deqCountMask) - 1.U)
   val lastCommitCount = RegNext(commitCount)
