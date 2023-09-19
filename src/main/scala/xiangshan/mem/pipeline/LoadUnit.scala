@@ -809,6 +809,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   //  2. Load instruction is younger than requestors(store instructions).
   //  3. Physical address match.
   //  4. Data contains.
+  // 判断是否发生in-pipe的st-ld violation
   val s2_nuke          = VecInit((0 until StorePipelineWidth).map(w => {
                           io.stld_nuke_query(w).valid && // query valid
                           isAfter(s2_in.uop.robIdx, io.stld_nuke_query(w).bits.robIdx) && // older store
@@ -1096,6 +1097,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
 
   //
   io.feedback_slow.valid                 := s3_valid && !s3_in.uop.robIdx.needFlush(io.redirect) && s3_fb_no_waiting
+  // 如果s3发现了replay情况(例如wpu_fail等)， 且lsq.ldin没有ready, 则需要RS重发
   io.feedback_slow.bits.hit              := !io.lsq.ldin.bits.rep_info.need_rep || io.lsq.ldin.ready
   io.feedback_slow.bits.flushState       := s3_in.ptwBack
   io.feedback_slow.bits.rsIdx            := s3_in.rsIdx

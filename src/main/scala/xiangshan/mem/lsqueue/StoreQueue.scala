@@ -162,6 +162,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   // Read dataModule
   assert(EnsbufferWidth <= 2)
   // rdataPtrExtNext and rdataPtrExtNext+1 entry will be read from dataModule
+  // 计算rdataPtrExtNext指针, 如果送到dataBuffer的第二个请求也被接受了, 则把每个指针加二
+  // 如果只送出去一个到sbuffer, 或者送出去一个mmio,也加一
   val rdataPtrExtNext = WireInit(Mux(dataBuffer.io.enq(1).fire(),
     VecInit(rdataPtrExt.map(_ + 2.U)),
     Mux(dataBuffer.io.enq(0).fire() || io.mmioStout.fire(),
@@ -178,6 +180,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   // is delayed so that load can get the right data from store queue.
   //
   // Modify deqPtrExtNext and io.sqDeq with care!
+  // 计算deqPtrExtNext指针, 如果送到sbuffer的第二个请求也被接受了, 则把每个指针加二
+  // 如果只送出去一个到sbuffer, 或者送出去一个mmio,也加一
   val deqPtrExtNext = Mux(RegNext(io.sbuffer(1).fire()),
     VecInit(deqPtrExt.map(_ + 2.U)),
     Mux(RegNext(io.sbuffer(0).fire()) || io.mmioStout.fire(),
@@ -185,18 +189,24 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       deqPtrExt
     )
   )
+  // 如果发给sbuffer的第二个req已经fire, 则说明deq了2个
+  // 否则deq的个数是一个或者0个
   io.sqDeq := RegNext(Mux(RegNext(io.sbuffer(1).fire()), 2.U,
     Mux(RegNext(io.sbuffer(0).fire()) || io.mmioStout.fire(), 1.U, 0.U)
   ))
   assert(!RegNext(RegNext(io.sbuffer(0).fire()) && io.mmioStout.fire()))
 
   for (i <- 0 until EnsbufferWidth) {
+    // 更新读取这些module的地址, 读指针rdataPtrExtNext在上面已经更新过
     dataModule.io.raddr(i) := rdataPtrExtNext(i).value
     paddrModule.io.raddr(i) := rdataPtrExtNext(i).value
     vaddrModule.io.raddr(i) := rdataPtrExtNext(i).value
   }
 
   // no inst will be committed 1 cycle before tval update
+  // TODO: 后面会把读出的rdata赋值给exceptionAddr, 但是什么时候写入的呢? 写入就是storeAddrIn正常写入
+  // 每个cycle都读取异常地址, 读取位置是下一个cycle最老的指令
+  // 出现异常后, 会根据
   vaddrModule.io.raddr(EnsbufferWidth) := (cmtPtrExt(0) + commitCount).value
 
   /**
@@ -239,7 +249,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
   // 从上一次ready的指针处, 往前看4条指令, 看其是否ready
   val addrReadyLookupVec = (0 until IssuePtrMoveStride).map(addrReadyPtrExt + _.U)
-  // 如果这四条指令中, store指令有效且(是mmio 或者 地址已经计算出来且有效)且指针没有跨过enqPtr, 则表明其已经ready
+  // 如果这四条指令中, store指令有效且(是mmio 或者 不是mmio但是地址已经计算出来且有效)且指针没有跨过enqPtr, 则表明其已经ready
   val addrReadyLookup = addrReadyLookupVec.map(ptr => allocated(ptr.value) && (mmio(ptr.value) || addrvalid(ptr.value)) && ptr =/= enqPtrExt(0))
   // 对于ready的store指令, 计算新的ready指针
   // 如果addrReadyLookup全false，则PriorityEncode(false.B, false.B, false.B, false, true.B)
@@ -254,6 +264,9 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   })
 
   when (io.brqRedirect.valid) {
+    // 计算地址已经ready的指针:
+    //  如果已经cmt的指令更年轻(isAfter(true)), 则取commt指令的指针(因为commit的指令其地址一定是ready的)
+    // 否则取马上要deq的指针
     addrReadyPtrExt := Mux(
       isAfter(cmtPtrExt(0), deqPtrExt(0)),
       cmtPtrExt(0),
@@ -264,6 +277,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   io.stAddrReadySqPtr := addrReadyPtrExt
 
   // update
+  // 更新data ready指针
   val dataReadyLookupVec = (0 until IssuePtrMoveStride).map(dataReadyPtrExt + _.U)
   val dataReadyLookup = dataReadyLookupVec.map(ptr => allocated(ptr.value) && (mmio(ptr.value) || datavalid(ptr.value)) && ptr =/= enqPtrExt(0))
   val nextDataReadyPtr = dataReadyPtrExt + PriorityEncoder(VecInit(dataReadyLookup.map(!_) :+ true.B))
@@ -313,9 +327,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       paddrModule.io.waddr(i) := stWbIndex
       paddrModule.io.wdata(i) := io.storeAddrIn(i).bits.paddr
       paddrModule.io.wmask(i) := io.storeAddrIn(i).bits.mask
+      // wlineflag: store指令是写入整条cacheline的指令
       paddrModule.io.wlineflag(i) := io.storeAddrIn(i).bits.wlineflag
       paddrModule.io.wen(i) := true.B
 
+      // vaddr用来干嘛? 送给storebuffer; 用来做forward的VA比较; 用来记录exceptionAddr
       vaddrModule.io.waddr(i) := stWbIndex
       vaddrModule.io.wdata(i) := io.storeAddrIn(i).bits.vaddr
       vaddrModule.io.wmask(i) := io.storeAddrIn(i).bits.mask
@@ -342,8 +358,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val storeAddrInFireReg = RegNext(io.storeAddrIn(i).fire() && !io.storeAddrIn(i).bits.miss)
     val stWbIndexReg = RegNext(stWbIndex)
     when (storeAddrInFireReg) {
+      // TODO: 如果mmio发生了异常在那里处理?
+      // 如果是mmio且没有异常, 则标记为pending, 当store mmio指令到达rob头部
+      // storeQueue负责把mmio发出去到uncacheChannel,收到response后取消pending
       pending(stWbIndexReg) := io.storeAddrInRe(i).mmio
-      mmio(stWbIndexReg) := io.storeAddrInRe(i).mmio
+      mmio(stWbIndexReg) :=    io.storeAddrInRe(i).mmio
       atomic(stWbIndexReg) := io.storeAddrInRe(i).atomic
     }
 
@@ -362,6 +381,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     when (io.storeDataIn(i).fire()) {
       // send data write req to data module
       dataModule.io.data.waddr(i) := stWbIndex
+      // 如果是cbo指令, 直接写入store queue就是0
       dataModule.io.data.wdata(i) := Mux(io.storeDataIn(i).bits.uop.ctrl.fuOpType === LSUOpType.cbo_zero,
         0.U,
         genWdata(io.storeDataIn(i).bits.data, io.storeDataIn(i).bits.uop.ctrl.fuOpType(1,0))
@@ -378,6 +398,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       )
     }
     // sq data write s1
+    // 写数据需要两拍
     when (
       RegNext(io.storeDataIn(i).fire())
       // && !RegNext(io.storeDataIn(i).bits.uop).robIdx.needFlush(io.brqRedirect)
@@ -405,6 +426,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     */
   // check over all lq entries and forward data from the first matched store
   for (i <- 0 until LoadPipelineWidth) {
+    // 如果循环队列没有发生回滚（flag相同），只需要与tail到sqIdx之间的uop比较sqIdx
+    // 否则, 循环队列发生回滚(flag不同), 则需要比较的uop分成两段
     // Compare deqPtr (deqPtr) and forward.sqIdx, we have two cases:
     // (1) if they have the same flag, we need to check range(tail, sqIdx)
     // (2) if they have different flags, we need to check range(tail, VirtualLoadQueueSize) and range(0, sqIdx)
@@ -420,11 +443,13 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
     val storeSetHitVec =
       if (LFSTEnable) {
+        // TODO: 这里为什么要loadWaitBit = true才行? 这里是用来判断是否需要wait前面store完成才能执行, 因此需要判断loadWaitBit(= shouldWait)拉高的那些load
         WireInit(VecInit((0 until StoreQueueSize).map(j => io.forward(i).uop.cf.loadWaitBit && uop(j).robIdx === io.forward(i).uop.cf.waitForRobIdx)))
       } else {
         WireInit(VecInit((0 until StoreQueueSize).map(j => uop(j).cf.storeSetHit && uop(j).cf.ssid === io.forward(i).uop.cf.ssid)))
       }
 
+    // TODO: 为啥有两个forward, 因为有两种可能: flag=0或者1
     val forwardMask1 = Mux(differentFlag, ~deqMask, deqMask ^ forwardMask)
     val forwardMask2 = Mux(differentFlag, forwardMask, 0.U(StoreQueueSize.W))
     val canForward1 = forwardMask1 & allValidVec.asUInt
@@ -436,9 +461,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     )
 
     // do real fwd query (cam lookup in load_s1)
+    // 产生forwardMmask后送到dataModule进行数据选择
     dataModule.io.needForward(i)(0) := canForward1 & vaddrModule.io.forwardMmask(i).asUInt
     dataModule.io.needForward(i)(1) := canForward2 & vaddrModule.io.forwardMmask(i).asUInt
 
+    // 把va和pa送入进行forward检查
     vaddrModule.io.forwardMdata(i) := io.forward(i).vaddr
     vaddrModule.io.forwardDataMask(i) := io.forward(i).mask
     paddrModule.io.forwardMdata(i) := io.forward(i).paddr
@@ -450,6 +477,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     // val vpmaskNotEqual = ((paddrModule.io.forwardMmask(i).asUInt ^ vaddrModule.io.forwardMmask(i).asUInt) & needForward) =/= 0.U
     // val vaddrMatchFailed = vpmaskNotEqual && io.forward(i).valid
     val vpmaskNotEqual = (
+      // 如果load指令访存地址的VAPA和前面store指令的访存VAPA能匹配,
+      // 则vaddrModule和paddrModule返回的forwardMmask相同, 异或操作后就是0
       (RegNext(paddrModule.io.forwardMmask(i).asUInt) ^ RegNext(vaddrModule.io.forwardMmask(i).asUInt)) &
       RegNext(needForward) &
       RegNext(addrValidVec.asUInt)
@@ -466,7 +495,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     XSPerfAccumulate("vaddr_match_really_failed", vaddrMatchFailed)
 
     // Fast forward mask will be generated immediately (load_s1)
-    io.forward(i).forwardMaskFast := dataModule.io.forwardMaskFast(i)
+    // forwardMaskFast并没有启用
+    // io.forward(i).forwardMaskFast := dataModule.io.forwardMaskFast(i)
 
     // Forward result will be generated 1 cycle later (load_s2)
     io.forward(i).forwardMask := dataModule.io.forwardMask(i)
@@ -487,6 +517,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val dataInvalidMaskReg = dataInvalidMask1Reg | dataInvalidMask2Reg
 
     // If SSID match, address not ready, mark it as addrInvalid
+    // 如果SSID匹配了(说明forward的load要等这个store执行完), 但是这个store的地址还没ready
     // load_s2: generate addrInvalid
     val addrInvalidMask1 = (~addrValidVec.asUInt & storeSetHitVec.asUInt & forwardMask1.asUInt)
     val addrInvalidMask2 = (~addrValidVec.asUInt & storeSetHitVec.asUInt & forwardMask2.asUInt)
@@ -544,14 +575,19 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
 
     when (RegNext(io.forward(i).uop.cf.loadWaitStrict)) {
+      // sqIdx-1表示当前的forward的load需要等前面所有store执行完
       io.forward(i).addrInvalidSqIdx := RegNext(io.forward(i).uop.sqIdx - 1.U)
     } .elsewhen (addrInvalidFlag) {
+      // 计算出一个需要等待的地址还没有ready的store指令的sqIdx
       io.forward(i).addrInvalidSqIdx.flag := Mux(!s2_differentFlag || addrInvalidSqIdx >= s2_deqPtrExt.value, s2_deqPtrExt.flag, s2_enqPtrExt.flag)
       io.forward(i).addrInvalidSqIdx.value := addrInvalidSqIdx
     } .otherwise {
       // may be store inst has been written to sbuffer already.
+      // RTL中没体现
       io.forward(i).addrInvalidSqIdx := RegNext(io.forward(i).uop.sqIdx)
     }
+
+    // TODO: 如果loadWaitStrict为true, 只要有invalidAddr没算出来就必须等
     io.forward(i).addrInvalid := Mux(RegNext(io.forward(i).uop.cf.loadWaitStrict), RegNext(hasInvalidAddr), addrInvalidFlag)
 
     // data invalid sq index
@@ -636,10 +672,12 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     io.uncache.req.bits.mask := DontCare // TODO
   }
 
+  // uncache请求是不是atomic指令, storeAddrInRe送进来的
   io.uncache.req.bits.atomic := atomic(RegNext(rdataPtrExtNext(0)).value)
 
   when(io.uncache.req.fire()){
     // mmio store should not be committed until uncache req is sent
+    // uncache发出后就可以标记为not pending
     pending(deqPtr) := false.B
 
     XSDebug(
@@ -669,6 +707,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   // Remove MMIO inst from store queue after MMIO request is being sent
   // That inst will be traced by uncache state machine
   when (io.mmioStout.fire()) {
+    // mmio写回（state == s_wb）后就可以从StoreQueue中删掉了
     allocated(deqPtr) := false.B
   }
 
@@ -685,6 +724,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       if(i == 0){
         // MMIO inst should not update committed flag
         // Note that commit count has been delayed for 1 cycle
+        // 对于mmio指令状态机轮转最后一定是comitCount>0后变idle
         when(uncacheState === s_idle){
           committed(cmtPtrExt(0).value) := true.B
         }
@@ -742,6 +782,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   }
   (1 until EnsbufferWidth).foreach(i => when(io.sbuffer(i).fire) { assert(io.sbuffer(i - 1).fire) })
   if (coreParams.dcacheParametersOpt.isEmpty) {
+    // 如果没有dcache, 用fakeRAM替代
     for (i <- 0 until EnsbufferWidth) {
       val ptr = deqPtrExt(i).value
       val fakeRAM = Module(new RAMHelper(64L * 1024 * 1024 * 1024))

@@ -98,6 +98,8 @@ class SbufferData(implicit p: Parameters) extends XSModule with HasSbufferConst 
     val maskOut = Output(Vec(StoreBufferSize, Vec(CacheLineVWords, Vec(VDataBytes, Bool()))))
   })
 
+  // CacheLineVWords = 64/16 = 4
+  // Reg(16, (4, (16, 8b))) = 16*4*16*8b
   val data = Reg(Vec(StoreBufferSize, Vec(CacheLineVWords, Vec(VDataBytes, UInt(8.W)))))
   // val mask = Reg(Vec(StoreBufferSize, Vec(CacheLineWords, Vec(DataBytes, Bool()))))
   val mask = RegInit(
@@ -178,6 +180,7 @@ class SbufferData(implicit p: Parameters) extends XSModule with HasSbufferConst 
   //   }
   // }
 
+  //都是reg,直接读走
   io.dataOut := data
   io.maskOut := mask
 }
@@ -205,6 +208,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   val data = dataModule.io.dataOut
   val mask = dataModule.io.maskOut
   val stateVec = RegInit(VecInit(Seq.fill(StoreBufferSize)(0.U.asTypeOf(new SbufferEntryState))))
+  // EvictCountBits = 21 b
   val cohCount = RegInit(VecInit(Seq.fill(StoreBufferSize)(0.U(EvictCountBits.W))))
   val missqReplayCount = RegInit(VecInit(Seq.fill(StoreBufferSize)(0.U(MissqReplayCountBits.W))))
 
@@ -255,10 +259,12 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   // sbuffer entry count
 
   val plru = new ValidPseudoLRU(StoreBufferSize)
+  // TODO: 为什么是+1?
   val accessIdx = Wire(Vec(EnsbufferWidth + 1, Valid(UInt(SbufferIndexWidth.W))))
 
   val candidateVec = VecInit(stateVec.map(s => s.isDcacheReqCandidate()))
 
+  //通过plru找到替换的entryID
   val replaceAlgoIdx = plru.way(candidateVec.reverse)._2
   val replaceAlgoNotDcacheCandidate = !stateVec(replaceAlgoIdx).isDcacheReqCandidate()
 
@@ -268,6 +274,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   plru.access(accessIdx)
 
   //-------------------------cohCount-----------------------------
+  // 用来选择一个踢出: 呆在Sbuffer中时间足够久
   // insert and merge: cohCount=0
   // every cycle cohCount+=1
   // if cohCount(EvictCountBits-1)==1, evict
@@ -297,8 +304,10 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   // * use cacheline level buffer to update sbuffer data and mask
   // * remove dcache write block (if there is)
 
+  // active=valid & !inflight
   val activeMask = VecInit(stateVec.map(s => s.isActive()))
   val validMask  = VecInit(stateVec.map(s => s.isValid()))
+  // 挑选第一个不是active的开始drain
   val drainIdx = PriorityEncoder(activeMask)
 
   val inflightMask = VecInit(stateVec.map(s => s.isInflight()))
@@ -315,6 +324,8 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   val mergeVec = mergeMask.map(_.asUInt)
 
   for(i <- 0 until EnsbufferWidth){
+    //如果enqueue的请求和现有的entry的ptag能匹配, 且entry有效,且entry没有正在写回Dcache
+    // TODO: 如果正在写回,写入的数据与正在写回的ptag也匹配, 会不会一起写回?
     mergeMask(i) := widthMap(j =>
       inptags(i) === ptag(j) && activeMask(j)
     )
@@ -325,6 +336,9 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   // firstInsert: the first invalid entry
   // if first entry canMerge or second entry has the same ptag with the first entry,
   // secondInsert equal the first invalid entry, otherwise, the second invalid entry
+  // firstInsert: 第一个无效的entry,可能是in0, 也可能是in1
+  // TODO: 如果第一个entry可以merge或者第二个entry和第一个entry的ptag一样,
+  // secondInsert就等于第一个无效的entry, 否则就等于第二个无效的entry
   val invalidMask = VecInit(stateVec.map(s => s.isInvalid()))
   val evenInvalidMask = GetEvenBits(invalidMask.asUInt)
   val oddInvalidMask = GetOddBits(invalidMask.asUInt)
@@ -349,12 +363,15 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
 
   val enbufferSelReg = RegInit(false.B)
   when(io.in(0).valid) {
+    // 先插入偶数entry还是先插入奇数entry, 按照in0是否有效对插入的奇偶位置进行乒乓选择
     enbufferSelReg := ~enbufferSelReg
   }
 
+  // 如果true选择偶
   val firstInsertIdx = Mux(enbufferSelReg, evenInsertIdx, oddInsertIdx) // slow to generate, for debug only
   val secondInsertIdx = Mux(sameTag,
     firstInsertIdx,
+    // 如果不是sameTag, 则选择跟firstInsertIdx中另一个index作为secondInsertIdx
     Mux(~enbufferSelReg, evenInsertIdx, oddInsertIdx)
   ) // slow to generate, for debug only
   val firstInsertVec = Mux(enbufferSelReg, evenInsertVec, oddInsertVec)
@@ -362,6 +379,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
     firstInsertVec,
     Mux(~enbufferSelReg, evenInsertVec, oddInsertVec)
   ) // slow to generate, for debug only
+  // 如果状态不是x_drain_sbuffer，则是否能insert取决于evenCanInsert或者oddCanInsert
   val firstCanInsert = sbuffer_state =/= x_drain_sbuffer && Mux(enbufferSelReg, evenCanInsert, oddCanInsert)
   val secondCanInsert = sbuffer_state =/= x_drain_sbuffer && Mux(sameTag,
     firstCanInsert,
@@ -372,6 +390,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   val do_uarch_drain = RegNext(forward_need_uarch_drain) || RegNext(RegNext(merge_need_uarch_drain))
   XSPerfAccumulate("do_uarch_drain", do_uarch_drain)
 
+  // in0优先级高于in1, 只有in0能进入sbuffer后才会enqueue in1
   io.in(0).ready := firstCanInsert
   io.in(1).ready := secondCanInsert && io.in(0).ready
 
@@ -421,6 +440,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
             vtag(entryIdx) << OffsetWidth,
             ptag(entryIdx) << OffsetWidth
           )
+          // TODO: 为什么ptag相等 vtag不等时也得触发drain
           merge_need_uarch_drain := true.B
         }
       }
@@ -437,15 +457,18 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
     val insertVec = if(i == 0) firstInsertVec else secondInsertVec
     assert(!((PopCount(insertVec) > 1.U) && in.fire()))
     val insertIdx = OHToUInt(insertVec)
+    // 插入新的entry时, 要更新对应idx的LRU信息
     accessIdx(i).valid := RegNext(in.fire())
     accessIdx(i).bits := RegNext(Mux(canMerge(i), mergeIdx(i), insertIdx))
     when(in.fire()){
+      // 能merge则merge, 否则新分配
       when(canMerge(i)){
         writeReq(i).bits.wvec := mergeVec(i)
         mergeWordReq(in.bits, inptags(i), invtags(i), mergeIdx(i), mergeVec(i), vwordOffset)
         XSDebug(p"merge req $i to line [${mergeIdx(i)}]\n")
       }.otherwise({
         writeReq(i).bits.wvec := insertVec
+        // 新分配
         wordReqToBufLine(in.bits, inptags(i), invtags(i), insertIdx, insertVec, vwordOffset)
         XSDebug(p"insert req $i to line[$insertIdx]\n")
         assert(debug_insertIdx === insertIdx)
@@ -475,7 +498,9 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   // ---------------------- Send Dcache Req ---------------------
 
   val sbuffer_empty = Cat(invalidMask).andR()
+  // 这里起的名字不对, 只是从sq来的请求是空, 并不代表sq为空
   val sq_empty = !Cat(io.in.map(_.valid)).orR()
+  // sq和sb都空
   val empty = sbuffer_empty && sq_empty
   val threshold = Wire(UInt(5.W)) // RegNext(io.csrCtrl.sbuffer_threshold +& 1.U)
   threshold := Constantin.createRecord("StoreBufferThreshold_"+p(XSCoreParamsKey).HartId.toString(), initValue = 7.U)
@@ -489,6 +514,8 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
 
   XSDebug(p"ActiveCount[$ActiveCount]\n")
 
+  // 如果sbuffer本身是空, sq整体都空, 从sq来的请求也是空
+  // 表示已经满足flush_empty的条件, 输出
   io.flush.empty := RegNext(empty && io.sqempty)
   // lru.io.flush := sbuffer_state === x_drain_all && empty
   switch(sbuffer_state){
@@ -564,6 +591,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   // sbuffer_out_s0
   // ---------------------------------------------------------------------------
 
+  // drain_all或者drain_sbuffer
   val need_drain = needDrain(sbuffer_state)
   val need_replace = do_eviction || (sbuffer_state === x_replace)
   val sbuffer_out_s0_evictionIdx = Mux(missqReplayHasTimeOut,
@@ -576,13 +604,16 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
 
   // If there is a inflight dcache req which has same ptag with sbuffer_out_s0_evictionIdx's ptag,
   // current eviction should be blocked.
+  // 如果state_inflight或者w_sameblock_inflight为true, 则不允许往dcache继续写
   val sbuffer_out_s0_valid = missqReplayHasTimeOut ||
     stateVec(sbuffer_out_s0_evictionIdx).isDcacheReqCandidate() &&
     (need_drain || cohHasTimeOut || need_replace)
+
   assert(!(
     stateVec(sbuffer_out_s0_evictionIdx).isDcacheReqCandidate &&
     !noSameBlockInflight(sbuffer_out_s0_evictionIdx)
   ))
+
   val sbuffer_out_s0_cango = sbuffer_out_s1_ready
   sbuffer_out_s0_fire := sbuffer_out_s0_valid && sbuffer_out_s0_cango
 
@@ -591,6 +622,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   // ---------------------------------------------------------------------------
 
   // TODO: use EnsbufferWidth
+  // wver是从sq写入, evictionIdx是写出到dcache, 如果匹配, 需要把写出到dcache的请求block
   val shouldWaitWriteFinish = RegNext(VecInit((0 until EnsbufferWidth).map{i =>
     (writeReq(i).bits.wvec.asUInt & UIntToOH(sbuffer_out_s0_evictionIdx).asUInt).orR &&
     writeReq(i).valid
@@ -621,6 +653,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   XSDebug(p"drainIdx:$drainIdx tIdx:$cohTimeOutIdx replIdx:$replaceIdx " +
     p"blocked:${!noSameBlockInflight(sbuffer_out_s0_evictionIdx)} v:${activeMask(sbuffer_out_s0_evictionIdx)}\n")
   XSDebug(p"sbuffer_out_s0_valid:$sbuffer_out_s0_valid evictIdx:$sbuffer_out_s0_evictionIdx dcache ready:${io.dcache.req.ready}\n")
+
   // Note: if other dcache req in the same block are inflight,
   // the lru update may not accurate
   accessIdx(EnsbufferWidth).valid := invalidMask(replaceIdx) || (
@@ -630,6 +663,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   val sbuffer_out_s1_evictionPTag = RegEnable(ptag(sbuffer_out_s0_evictionIdx), enable = sbuffer_out_s0_fire)
   val sbuffer_out_s1_evictionVTag = RegEnable(vtag(sbuffer_out_s0_evictionIdx), enable = sbuffer_out_s0_fire)
 
+  // 发送请求给dcache
   io.dcache.req.valid := sbuffer_out_s1_valid && !blockDcacheWrite
   io.dcache.req.bits := DontCare
   io.dcache.req.bits.cmd   := MemoryOpConstants.M_XWR
@@ -655,6 +689,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
     id(log2Up(StoreBufferSize)-1, 0)
   }
 
+  // dcache如果hit, 收到resp
   // hit resp
   io.dcache.hit_resps.map(resp => {
     val dcache_resp_id = resp.bits.id
@@ -684,10 +719,12 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
   })
 
   io.dcache.hit_resps.zip(dataModule.io.maskFlushReq).map{case (resp, maskFlush) => {
+    // 写入dcache的数据后, 可以把Sbuffer entry中的mask更新(清零), 根据resp.id标记具体的wvec
     maskFlush.valid := resp.fire()
     maskFlush.bits.wvec := UIntToOH(resp.bits.id)
   }}
 
+  // dcache如果没有hit, 发送replay_resp
   // replay resp
   val replay_resp_id = io.dcache.replay_resp.bits.id
   when (io.dcache.replay_resp.fire()) {
@@ -742,6 +779,8 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
         RegNext(forward.vaddr),
         RegNext(forward.paddr)
       )
+      // 如果tag_mismatch,则需要drain SBbuffer, 因为如果不drain的话, 下次relpay时forward还会发生这种情况
+      // 从而继续导致forward fail
       forward_need_uarch_drain := true.B
     }
     val valid_tag_matches = widthMap(w => tag_matches(w) && activeMask(w))
