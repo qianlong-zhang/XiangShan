@@ -29,7 +29,6 @@ import xiangshan.backend.fu.fpu.FMAMidResultIO
 import xiangshan.mem.{MemWaitUpdateReq, SqPtr}
 
 import scala.math.max
-import chisel3.ExcitingUtils
 
 case class RSParams
 (
@@ -73,6 +72,7 @@ case class RSParams
 }
 
 class ReservationStationWrapper(implicit p: Parameters) extends LazyModule with HasXSParameter {
+  override def shouldBeInlined: Boolean = false
   val params = new RSParams
 
   def addIssuePort(cfg: ExuConfig, deq: Int): Unit = {
@@ -243,6 +243,7 @@ class ReservationStationIO(params: RSParams)(implicit p: Parameters) extends XSB
   }) else None
   val load = if (params.isLoad) Some(Vec(params.numDeq, new Bundle {
     val fastMatch = Output(UInt(exuParameters.LduCnt.W))
+    val fastFuOpType = Output(FuOpType())
     val fastImm = Output(UInt(12.W))
   })) else None
   val fmaMid = if (params.exuCfg.get == FmacExeUnitCfg) Some(Vec(params.numDeq, Flipped(new FMAMidResultIO))) else None
@@ -777,6 +778,7 @@ class ReservationStation(params: RSParams)(implicit p: Parameters) extends XSMod
         io.load.get(i).fastMatch := Mux(s1_issuePtrOH(i).valid, VecInit(
           wakeupBypassMask.drop(exuParameters.AluCnt).take(exuParameters.LduCnt).map(_.asUInt.orR)
         ).asUInt, 0.U)
+        io.load.get(i).fastFuOpType := s1_out(i).bits.uop.ctrl.fuOpType
         io.load.get(i).fastImm := s1_out(i).bits.uop.ctrl.imm
       }
 
