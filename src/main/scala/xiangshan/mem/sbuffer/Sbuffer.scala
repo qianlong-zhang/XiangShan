@@ -477,6 +477,7 @@ class Sbuffer(implicit p: Parameters) extends DCacheModule with HasSbufferConst 
     })
   }
 
+  // 写入sbuffer
   for(((in, vwordOffset), i) <- io.in.zip(Seq(firstWord, secondWord)).zipWithIndex){
     writeReq(i).valid := in.fire()
     writeReq(i).bits.vwordOffset := vwordOffset

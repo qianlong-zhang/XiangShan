@@ -207,11 +207,11 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   // 不包含std
   val exeUnits = loadUnits ++ storeUnits
   val l1_pf_req = Wire(Decoupled(new L1PrefetchReq()))
-  // TODO: 送给预取器的信号为什么都是延迟2拍?
   val prefetcherOpt: Option[BasePrefecher] = coreParams.prefetcher.map {
     case _: SMSParams =>
       val sms = Module(new SMSPrefetcher())
       // 把配置SMS的信息通过csr写入SMS中
+      // TODO: 送给预取器的信号为什么都是延迟2拍?
       sms.io_agt_en := RegNextN(io.ooo_to_mem.csrCtrl.l1D_pf_enable_agt, 2, Some(false.B))
       sms.io_pht_en := RegNextN(io.ooo_to_mem.csrCtrl.l1D_pf_enable_pht, 2, Some(false.B))
       sms.io_act_threshold := RegNextN(io.ooo_to_mem.csrCtrl.l1D_pf_active_threshold, 2, Some(12.U))
@@ -267,7 +267,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   ldout0.bits  := loadWritebackOverride
   atomicsUnit.io.out.ready := ldout0.ready
   loadUnits.head.io.ldout.ready := ldout0.ready
->>>>>>> ffc9de54938a9574f465b83a71d5252cfd37cf30
+
   when(atomicsUnit.io.out.valid){
     // 如果写回的是atomicsUnit, 则atmoicsUnit的异常信号是从store写回, 而不是从loadUnits写回
     // 所以这里把loadUnits的异常向量全部清空
@@ -578,6 +578,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     loadUnits(i).io.ldin <> io.ooo_to_mem.issue(i)
     loadUnits(i).io.feedback_slow <> io.rsfeedback(i).feedbackSlow
     loadUnits(i).io.feedback_fast <> io.rsfeedback(i).feedbackFast
+    // rsIdx封装在rsfeedback有点不合理
     loadUnits(i).io.rsIdx := io.rsfeedback(i).rsIdx
     loadUnits(i).io.correctMissTrain := correctMissTrain
 
@@ -725,16 +726,10 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
 
   }
   // Prefetcher
-<<<<<<< HEAD
-  // PrefetcherDTLBPortIndex 正好是dtlb_reqs中对应dtlb_prefetch
-  // 这里是把prefetcher的tlb_req送到pfetch专用的dtlb_prefetch去处理
-  val PrefetcherDTLBPortIndex = exuParameters.LduCnt + exuParameters.StuCnt
-=======
   val StreamDTLBPortIndex = exuParameters.LduCnt
   // PrefetcherDTLBPortIndex 正好是dtlb_reqs中对应dtlb_prefetch
   // 这里是把prefetcher的tlb_req送到pfetch专用的dtlb_prefetch去处理
   val PrefetcherDTLBPortIndex = exuParameters.LduCnt + exuParameters.StuCnt + 1
->>>>>>> c89b46421f4e4f58aeacd51297260c254a386e8b
   prefetcherOpt match {
   case Some(pf) => dtlb_reqs(PrefetcherDTLBPortIndex) <> pf.io.tlb_req
   case None =>
@@ -764,11 +759,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     stdExeUnits(i).io.out := DontCare
 
     stu.io.redirect      <> redirect
-<<<<<<< HEAD
-    // 从stu输出到rsfeedback, 由于rsfeedback是和ldu一起计算, 因此前面加上LduCnt后表示是stu的开始
-=======
     stu.io.dcache        <> dcache.io.lsu.sta(i)
->>>>>>> c89b46421f4e4f58aeacd51297260c254a386e8b
+    // 从stu输出到rsfeedback, 由于rsfeedback是和ldu一起计算, 因此前面加上LduCnt后表示是stu的开始
     stu.io.feedback_slow <> io.rsfeedback(exuParameters.LduCnt + i).feedbackSlow
     // 从rs输出的rsIdx
     stu.io.rsIdx         <> io.rsfeedback(exuParameters.LduCnt + i).rsIdx
@@ -782,18 +774,13 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     // 从stu的s2 stage输出到lsq
     stu.io.lsq_replenish <> lsq.io.sta.storeAddrInRe(i)
     // dtlb
-<<<<<<< HEAD
-    // 把sta的tlb请求送到专属于store的dtlb_st中处理
-    stu.io.tlb          <> dtlb_reqs.drop(exuParameters.LduCnt)(i)
-    // 从pmp返回的check结果给stu
-    stu.io.pmp          <> pmp_check(i+exuParameters.LduCnt).resp
-=======
+  // 把sta的tlb请求送到专属于store的dtlb_st中处理
     stu.io.tlb          <> dtlb_reqs.drop(exuParameters.LduCnt + 1)(i)
+    // 从pmp返回的check结果给stu
     stu.io.pmp          <> pmp_check(exuParameters.LduCnt + 1 + i).resp
 
     // prefetch
     stu.io.prefetch_req <> sbuffer.io.store_prefetch(i)
->>>>>>> c89b46421f4e4f58aeacd51297260c254a386e8b
 
     // store unit does not need fast feedback
     // storeunit没有快速唤醒通路

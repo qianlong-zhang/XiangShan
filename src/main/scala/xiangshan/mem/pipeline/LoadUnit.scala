@@ -1049,13 +1049,13 @@ class LoadUnit(implicit p: Parameters) extends XSModule
       io.lsq.ldld_nuke_query.resp.valid &&
       io.lsq.ldld_nuke_query.resp.bits.rep_frm_fetch &&
       RegNext(io.csrCtrl.ldld_vio_check_enable)
+  val s3_rep_frm_fetch = s3_vp_match_fail || s3_ldld_rep_inst
 
   val s3_rep_info = WireInit(s3_in.rep_info)
   s3_rep_info.wpu_fail      := s3_in.rep_info.wpu_fail && !s3_fwd_frm_d_chan_valid && s3_troublem
   s3_rep_info.bank_conflict := s3_in.rep_info.bank_conflict && !s3_fwd_frm_d_chan_valid && s3_troublem
   s3_rep_info.dcache_miss   := s3_in.rep_info.dcache_miss && !s3_fwd_frm_d_chan_valid && s3_troublem
   s3_rep_info.nuke          := s3_nuke && s3_troublem
-  val s3_rep_frm_fetch = s3_vp_match_fail || s3_ldld_rep_inst
   val s3_sel_rep_cause = PriorityEncoderOH(s3_rep_info.cause.asUInt)
   val s3_force_rep     = s3_sel_rep_cause(LoadReplayCauses.C_TM) &&
                          !s3_in.uop.cf.exceptionVec(loadAddrMisaligned) &&
@@ -1063,6 +1063,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
 
   val s3_exception = ExceptionNO.selectByFu(s3_in.uop.cf.exceptionVec, lduCfg).asUInt.orR
   when ((s3_exception || s3_dly_ld_err || s3_rep_frm_fetch) && !s3_force_rep) {
+    // 有异常情况下, 把replay信息清空
     io.lsq.ldin.bits.rep_info.cause := 0.U.asTypeOf(s3_rep_info.cause.cloneType)
   } .otherwise {
     io.lsq.ldin.bits.rep_info.cause := VecInit(s3_sel_rep_cause.asBools)
@@ -1101,6 +1102,8 @@ class LoadUnit(implicit p: Parameters) extends XSModule
                  !s3_rep_frm_fetch &&
                  !s3_exception
 
+  // TODO: 对于s3_fast_rep, 是否会出现重复走流水的情况? 前面通过fast_rep_out送出了, 这里再次送到RS
+  // 不会, 对于走fast_rep_out的情况, s3_fb_no_waiting会拉低
   val s3_fb_no_waiting = !s3_in.isLoadReplay && !(s3_fast_rep && io.fast_rep_out.ready) && !s3_in.feedbacked
 
   //

@@ -120,6 +120,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     numForward = StorePipelineWidth
   ))
   vaddrModule.io := DontCare
+  // 在storeQueue和StoreBuffer中间的fifo
   val dataBuffer = Module(new DatamoduleResultBuffer(new DataBufferEntry))
   val debug_paddr = Reg(Vec(StoreQueueSize, UInt((PAddrBits).W)))
   val debug_vaddr = Reg(Vec(StoreQueueSize, UInt((VAddrBits).W)))

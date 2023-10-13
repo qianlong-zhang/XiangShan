@@ -128,11 +128,13 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   storeQueue.io.enq.lqCanAccept := loadQueue.io.enq.canAccept
   for (i <- io.enq.req.indices) {
     // 在Dispatch2RS.scala中对needAlloc赋值, 其中定义了needAlloc是2bit数,
-    // 对于非load store=0b00; 对于store且不是amo=0b10, 对于其他(load或者amo)=0b01;
+    // 对于非load store=0b00; 对于store且不是amo的=0b10, 对于其他(load或者amo)=0b01;
     // 如果bit0=0, 说明是非load store或者是store, 则loadQueue不需要alloc
     loadQueue.io.enq.needAlloc(i)      := io.enq.needAlloc(i)(0)
     loadQueue.io.enq.req(i).valid      := io.enq.needAlloc(i)(0) && io.enq.req(i).valid
     loadQueue.io.enq.req(i).bits       := io.enq.req(i).bits
+    // 对于load指令, enqueue到loadQueue时, 会去读StoreQueue中读取当前的sqIdx,
+    // 因此对于loadQueue enqueue来说, enqLsq中自带的sqIdx是无效的
     loadQueue.io.enq.req(i).bits.sqIdx := storeQueue.io.enq.resp(i)
 
     // bit1如果=1, 说明是store且不是amo, 则storeQueue需要alloc
